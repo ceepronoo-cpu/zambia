@@ -93,9 +93,22 @@ const answerCb     = (bot, id, text='') => tg(bot, 'answerCallbackQuery', { call
 // ---------- Webhooks ----------
 async function setWebhook(bot) {
   const url = `${DOMAIN}/telegram/${bot.botId}`;
-  const r = await tg(bot, 'setWebhook', { url, allowed_updates: REQUIRED_UPDATES, drop_pending_updates: false });
-  if (r?.ok) console.log(`✅ webhook set ${bot.botId} → ${url}`);
-  else console.error(`❌ webhook failed ${bot.botId}`, r);
+
+  console.log('🌐 Setting Telegram webhook:', url);
+
+  const r = await tg(bot, 'setWebhook', {
+    url,
+    allowed_updates: REQUIRED_UPDATES,
+    drop_pending_updates: false
+  });
+
+  console.log('📡 Telegram setWebhook response:', JSON.stringify(r, null, 2));
+
+  if (r?.ok) {
+    console.log(`✅ webhook set ${bot.botId} → ${url}`);
+  } else {
+    console.error(`❌ webhook failed ${bot.botId}`, r);
+  }
 }
 async function initWebhooks() { for (const b of bots) await setWebhook(b); }
 
