@@ -206,12 +206,25 @@ app.get('/check-pin/:requestId',   handleCheck);
 app.get('/check-code/:requestId',  handleCheck);
 
 // ---------- Telegram webhook ----------
+// ---------- Telegram webhook ----------
+
+app.get('/telegram/:botId', (req, res) => {
+  console.log('🧪 TELEGRAM GET TEST:', req.params.botId);
+
+  res.json({
+    ok: true,
+    route: `/telegram/${req.params.botId}`
+  });
+});
+
 app.post('/telegram/:botId', async (req, res) => {
   console.log('🚨 TELEGRAM WEBHOOK RECEIVED');
   console.log('botId:', req.params.botId);
   console.log('body:', JSON.stringify(req.body));
 
   res.sendStatus(200);
+
+  // ...the rest of your existing code...
   try {
     const bot = getBot(req.params.botId);
     if (!bot) return console.log('❌ webhook unknown bot', req.params.botId);
