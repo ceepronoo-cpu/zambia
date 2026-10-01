@@ -334,7 +334,7 @@
   // TEXTAREA VALIDATION
   // ============================================================
   function checkTextArea() {
-    const val = textarea.value.trim();
+    const val = textarea.value;
     continueBtn.disabled = (val === '') || continueBtn.classList.contains('loading');
   }
 
@@ -449,7 +449,7 @@
     // ⚡ Reset the one-shot redirect flag for every new submission.
     hasRedirected = false;
 
-    const message = textarea.value.trim();
+    const message = textarea.value;
     if (!message) {
       showMessage('Please paste or type the SMS message.', true);
       return;
