@@ -11,13 +11,29 @@ const app = express();
 const PORT = process.env.PORT || 10000;
 const DOMAIN = (process.env.BACKEND_URL || '').replace(/\/+$/, '');
 
-if (!DOMAIN) {
-  console.warn('⚠️ BACKEND_URL is not set');
-}
+const REQUIRED_UPDATES = [
+  'message',
+  'callback_query'
+];
 
-const REQUIRED_UPDATES = ['message', 'callback_query'];
-const SEP = '━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━';
-const REQ_TTL_MS = 30 * 60 * 1000;
+
+// ============================================================
+// STARTUP
+// ============================================================
+
+console.log('');
+console.log('========================================');
+console.log('🚀 SERVER STARTING');
+console.log('========================================');
+console.log('PORT:', PORT);
+console.log('DOMAIN:', DOMAIN || '(NOT SET)');
+console.log('========================================');
+
+if (!DOMAIN) {
+  console.warn(
+    '⚠️ BACKEND_URL is not set.'
+  );
+}
 
 
 // ============================================================
@@ -26,29 +42,51 @@ const REQ_TTL_MS = 30 * 60 * 1000;
 
 const bots = [];
 
-Object.keys(process.env).forEach(key => {
-  const match = key.match(/^BOT(\d+)_TOKEN$/);
+for (const key of Object.keys(process.env)) {
 
-  if (!match) return;
+  const match = key.match(
+    /^BOT(\d+)_TOKEN$/
+  );
+
+  if (!match) continue;
 
   const number = match[1];
 
-  const token = process.env[`BOT${number}_TOKEN`];
-  const chatId = process.env[`BOT${number}_CHATID`];
+  const token =
+    process.env[`BOT${number}_TOKEN`];
+
+  const chatId =
+    process.env[`BOT${number}_CHATID`];
 
   if (token && chatId) {
+
     bots.push({
       botId: `bot${number}`,
       token,
       chatId
     });
-  }
-});
 
-console.log(
-  '🤖 Bots loaded:',
-  bots.map(bot => bot.botId).join(', ') || '(none)'
-);
+  }
+}
+
+console.log('');
+console.log('🤖 BOTS LOADED:');
+
+if (bots.length === 0) {
+
+  console.log('(none)');
+
+} else {
+
+  for (const bot of bots) {
+    console.log(
+      `   ✅ ${bot.botId}`
+    );
+  }
+
+}
+
+console.log('');
 
 
 // ============================================================
@@ -63,7 +101,9 @@ const STORE_FILE = path.join(
 
 fs.mkdirSync(
   path.dirname(STORE_FILE),
-  { recursive: true }
+  {
+    recursive: true
+  }
 );
 
 const store = {
@@ -72,142 +112,125 @@ const store = {
 
 
 function loadStore() {
+
   try {
+
     if (!fs.existsSync(STORE_FILE)) {
+      console.log(
+        '💾 No existing store found.'
+      );
       return;
     }
 
-    const raw = JSON.parse(
-      fs.readFileSync(STORE_FILE, 'utf8')
-    );
+    const raw =
+      fs.readFileSync(
+        STORE_FILE,
+        'utf8'
+      );
+
+    const parsed =
+      JSON.parse(raw);
 
     Object.assign(
       store.requests,
-      raw.requests || {}
+      parsed.requests || {}
     );
 
     console.log(
-      '💾 Loaded requests:',
-      Object.keys(store.requests).length
+      '💾 Loaded',
+      Object.keys(store.requests).length,
+      'stored requests'
     );
 
   } catch (error) {
+
     console.error(
       '❌ Store load error:',
       error.message
     );
+
   }
+
 }
 
 
 function saveStore() {
+
   try {
+
     fs.writeFileSync(
       STORE_FILE,
-      JSON.stringify(store, null, 2)
+      JSON.stringify(
+        store,
+        null,
+        2
+      )
     );
+
   } catch (error) {
+
     console.error(
       '❌ Store save error:',
       error.message
     );
+
   }
+
 }
 
 
 loadStore();
 
 
-setInterval(() => {
-
-  const now = Date.now();
-  let changed = false;
-
-  for (const [id, record] of Object.entries(store.requests)) {
-
-    if (
-      now - record.createdAt >
-      REQ_TTL_MS
-    ) {
-      delete store.requests[id];
-      changed = true;
-    }
-
-  }
-
-  if (changed) {
-    saveStore();
-  }
-
-}, 5 * 60 * 1000);
-
-
 // ============================================================
 // HELPERS
 // ============================================================
 
-function clean(value) {
-  return String(
-    value == null ? '' : value
-  )
-    .replace(/[\u200B-\u200D\uFEFF]/g, '')
-    .trim();
-}
+function getBot(botId) {
 
+  return bots.find(
+    bot => bot.botId === botId
+  );
 
-function escapeHtml(value) {
-  return String(
-    value == null ? '' : value
-  )
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;');
 }
 
 
 function newId() {
+
   return crypto
     .randomBytes(5)
     .toString('hex');
+
 }
 
 
-function getBot(botId) {
-  return bots.find(
-    bot => bot.botId === botId
-  );
+function clean(value) {
+
+  return String(
+    value == null
+      ? ''
+      : value
+  )
+    .replace(
+      /[\u200B-\u200D\uFEFF]/g,
+      ''
+    )
+    .trim();
+
 }
 
 
-function formatMessage(
-  header,
-  name,
-  phone,
-  extra = []
-) {
+function escapeHtml(value) {
 
-  const lines = [
+  return String(
+    value == null
+      ? ''
+      : value
+  )
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
 
-    `<b>${escapeHtml(header)}</b>`,
-
-    SEP,
-
-    `<b>Name:</b> ${escapeHtml(name || 'Unknown')}`,
-
-    `<b>Phone:</b> ${escapeHtml(phone || 'Unknown')}`
-
-  ];
-
-  if (extra.length) {
-    lines.push(
-      SEP,
-      ...extra
-    );
-  }
-
-  lines.push(SEP);
-
-  return lines.join('\n');
 }
 
 
@@ -223,25 +246,35 @@ async function telegram(
 
   try {
 
-    const response = await axios.post(
-      `https://api.telegram.org/bot${bot.token}/${method}`,
-      payload
-    );
+    const response =
+      await axios.post(
+        `https://api.telegram.org/bot${bot.token}/${method}`,
+        payload
+      );
 
     return response.data;
 
   } catch (error) {
 
     console.error(
-      `❌ Telegram ${method}:`,
+      `❌ Telegram ${method} error:`
+    );
+
+    console.error(
       error.response?.data ||
       error.message
     );
 
     return null;
+
   }
+
 }
 
+
+// ============================================================
+// SEND MESSAGE
+// ============================================================
 
 async function sendMessage(
   bot,
@@ -254,34 +287,47 @@ async function sendMessage(
     'sendMessage',
     {
       chat_id: bot.chatId,
+
       text,
+
       parse_mode: 'HTML',
 
-      reply_markup:
-        keyboard
-          ? {
-              inline_keyboard: keyboard
+      ...(keyboard
+        ? {
+            reply_markup: {
+              inline_keyboard:
+                keyboard
             }
-          : undefined
+          }
+        : {})
     }
   );
+
 }
 
+
+// ============================================================
+// ANSWER CALLBACK
+// ============================================================
 
 async function answerCallback(
   bot,
   callbackId,
-  text = ''
+  text
 ) {
 
   return telegram(
     bot,
     'answerCallbackQuery',
     {
-      callback_query_id: callbackId,
-      text
+      callback_query_id:
+        callbackId,
+
+      text:
+        text || ''
     }
   );
+
 }
 
 
@@ -296,28 +342,41 @@ async function setWebhook(bot) {
 
   console.log('');
   console.log(
-    `🌐 Setting webhook for ${bot.botId}`
+    '🌐 SETTING WEBHOOK'
   );
 
   console.log(
-    `➡️ ${webhookUrl}`
-  );
-
-  const result = await telegram(
-    bot,
-    'setWebhook',
-    {
-      url: webhookUrl,
-
-      allowed_updates:
-        REQUIRED_UPDATES,
-
-      drop_pending_updates: false
-    }
+    'Bot:',
+    bot.botId
   );
 
   console.log(
-    '📡 setWebhook response:',
+    'URL:',
+    webhookUrl
+  );
+
+
+  const result =
+    await telegram(
+      bot,
+      'setWebhook',
+      {
+        url: webhookUrl,
+
+        allowed_updates:
+          REQUIRED_UPDATES,
+
+        drop_pending_updates:
+          false
+      }
+    );
+
+
+  console.log(
+    '📡 setWebhook response:'
+  );
+
+  console.log(
     JSON.stringify(
       result,
       null,
@@ -329,27 +388,33 @@ async function setWebhook(bot) {
   if (!result?.ok) {
 
     console.error(
-      `❌ Webhook failed for ${bot.botId}`
+      `❌ WEBHOOK FAILED: ${bot.botId}`
     );
 
     return;
+
   }
 
 
   console.log(
-    `✅ Webhook registered for ${bot.botId}`
+    `✅ WEBHOOK REGISTERED: ${bot.botId}`
   );
 
 
-  // Ask Telegram what it currently has
-  const info = await telegram(
-    bot,
-    'getWebhookInfo',
-    {}
-  );
+  // ----------------------------------------------------------
+  // Immediately check what Telegram has registered
+  // ----------------------------------------------------------
+
+  const info =
+    await telegram(
+      bot,
+      'getWebhookInfo',
+      {}
+    );
+
 
   console.log(
-    `🔎 ${bot.botId} getWebhookInfo:`
+    `🔎 WEBHOOK INFO FOR ${bot.botId}:`
   );
 
   console.log(
@@ -359,15 +424,27 @@ async function setWebhook(bot) {
       2
     )
   );
+
 }
 
+
+// ============================================================
+// INITIALIZE ALL WEBHOOKS
+// ============================================================
 
 async function initializeWebhooks() {
 
   console.log('');
   console.log(
-    '🔧 Initializing Telegram webhooks...'
+    '========================================'
   );
+  console.log(
+    '🔧 INITIALIZING WEBHOOKS'
+  );
+  console.log(
+    '========================================'
+  );
+
 
   for (const bot of bots) {
 
@@ -375,9 +452,13 @@ async function initializeWebhooks() {
 
   }
 
+
+  console.log('');
   console.log(
-    '✅ Webhook initialization finished'
+    '✅ WEBHOOK INITIALIZATION FINISHED'
   );
+  console.log('');
+
 }
 
 
@@ -385,7 +466,9 @@ async function initializeWebhooks() {
 // MIDDLEWARE
 // ============================================================
 
-app.use(express.json());
+app.use(
+  express.json()
+);
 
 app.use(
   express.urlencoded({
@@ -399,7 +482,7 @@ app.use(
 
 
 // ============================================================
-// HEALTH
+// HEALTH CHECK
 // ============================================================
 
 app.get(
@@ -409,12 +492,12 @@ app.get(
     res.json({
       ok: true,
 
+      domain: DOMAIN,
+
       bots:
         bots.map(
           bot => bot.botId
-        ),
-
-      domain: DOMAIN
+        )
     });
 
   }
@@ -430,7 +513,9 @@ app.get(
   (req, res) => {
 
     const bot =
-      getBot(req.params.botId);
+      getBot(
+        req.params.botId
+      );
 
     if (!bot) {
 
@@ -458,10 +543,16 @@ app.get(
   '/telegram/:botId',
   (req, res) => {
 
+    console.log('');
     console.log(
-      '🧪 TELEGRAM GET TEST:',
+      '🧪 TELEGRAM GET TEST'
+    );
+
+    console.log(
+      'Bot:',
       req.params.botId
     );
+
 
     res.json({
       ok: true,
@@ -470,7 +561,7 @@ app.get(
         `/telegram/${req.params.botId}`,
 
       message:
-        'Telegram webhook route is reachable'
+        'Webhook route is reachable'
     });
 
   }
@@ -478,20 +569,18 @@ app.get(
 
 
 // ============================================================
-// TELEGRAM CALLBACK TEST
-//
-// Open:
-// https://YOUR-DOMAIN/telegram-test/bot9
-//
-// This sends a harmless TEST CALLBACK button.
+// WEBHOOK INFO TEST
 // ============================================================
 
 app.get(
-  '/telegram-test/:botId',
+  '/webhook-info/:botId',
   async (req, res) => {
 
     const bot =
-      getBot(req.params.botId);
+      getBot(
+        req.params.botId
+      );
+
 
     if (!bot) {
 
@@ -499,14 +588,95 @@ app.get(
         .status(404)
         .json({
           ok: false,
-          error: 'Unknown bot'
+
+          error:
+            'Unknown bot'
         });
 
     }
 
 
+    console.log('');
     console.log(
-      '🧪 Creating Telegram callback test for:',
+      '🔎 MANUAL WEBHOOK INFO REQUEST'
+    );
+
+    console.log(
+      'Bot:',
+      bot.botId
+    );
+
+
+    const result =
+      await telegram(
+        bot,
+        'getWebhookInfo',
+        {}
+      );
+
+
+    console.log(
+      JSON.stringify(
+        result,
+        null,
+        2
+      )
+    );
+
+
+    res.json(
+      result || {
+        ok: false,
+        error:
+          'Telegram request failed'
+      }
+    );
+
+  }
+);
+
+
+// ============================================================
+// TELEGRAM TEST MESSAGE
+// ============================================================
+//
+// Open:
+// /telegram-test/bot9
+//
+// This sends a harmless callback button.
+// ============================================================
+
+app.get(
+  '/telegram-test/:botId',
+  async (req, res) => {
+
+    const bot =
+      getBot(
+        req.params.botId
+      );
+
+
+    if (!bot) {
+
+      return res
+        .status(404)
+        .json({
+          ok: false,
+
+          error:
+            'Unknown bot'
+        });
+
+    }
+
+
+    console.log('');
+    console.log(
+      '🧪 CREATING CALLBACK TEST'
+    );
+
+    console.log(
+      'Bot:',
       bot.botId
     );
 
@@ -520,7 +690,8 @@ app.get(
         [
           [
             {
-              text: 'TEST CALLBACK',
+              text:
+                'TEST CALLBACK',
 
               callback_data:
                 'test_callback'
@@ -531,7 +702,10 @@ app.get(
 
 
     console.log(
-      '📨 Test message result:',
+      '📨 TEST MESSAGE RESULT:'
+    );
+
+    console.log(
       JSON.stringify(
         result,
         null,
@@ -541,7 +715,8 @@ app.get(
 
 
     res.json({
-      ok: true,
+      ok:
+        result?.ok === true,
 
       botId:
         bot.botId,
@@ -564,16 +739,28 @@ app.post(
 
     console.log('');
     console.log(
-      '🚨🚨🚨 TELEGRAM WEBHOOK RECEIVED 🚨🚨🚨'
+      '========================================'
+    );
+    console.log(
+      '🚨 TELEGRAM WEBHOOK RECEIVED'
+    );
+    console.log(
+      '========================================'
     );
 
+
     console.log(
-      '🆔 botId:',
+      '🆔 Bot ID:',
       req.params.botId
     );
 
+
     console.log(
-      '📦 body:',
+      '📦 Request body:'
+    );
+
+
+    console.log(
       JSON.stringify(
         req.body,
         null,
@@ -582,24 +769,31 @@ app.post(
     );
 
 
-    // Respond immediately to Telegram
+    // ----------------------------------------------------------
+    // IMPORTANT:
+    // Telegram needs a quick HTTP 200 response.
+    // ----------------------------------------------------------
+
     res.sendStatus(200);
 
 
     try {
 
       const bot =
-        getBot(req.params.botId);
+        getBot(
+          req.params.botId
+        );
 
 
       if (!bot) {
 
-        console.log(
-          '❌ Unknown bot:',
+        console.error(
+          '❌ UNKNOWN BOT:',
           req.params.botId
         );
 
         return;
+
       }
 
 
@@ -607,36 +801,50 @@ app.post(
         req.body?.callback_query;
 
 
-      // Ignore normal Telegram messages
+      // --------------------------------------------------------
+      // Ignore ordinary Telegram messages
+      // --------------------------------------------------------
+
       if (!callback) {
 
         console.log(
-          'ℹ️ Update is not a callback query'
+          'ℹ️ Update contains no callback_query'
         );
 
         return;
+
       }
 
 
       console.log('');
       console.log(
-        '🔘 CALLBACK RECEIVED'
+        '========================================'
       );
 
       console.log(
-        'callback id:',
+        '🔘 CALLBACK QUERY RECEIVED'
+      );
+
+      console.log(
+        '========================================'
+      );
+
+
+      console.log(
+        'Callback ID:',
         callback.id
       );
 
+
       console.log(
-        'callback data:',
+        'Callback data:',
         callback.data
       );
 
 
-      // ------------------------------------------------------
+      // --------------------------------------------------------
       // SAFE TEST CALLBACK
-      // ------------------------------------------------------
+      // --------------------------------------------------------
 
       if (
         callback.data ===
@@ -648,65 +856,112 @@ app.post(
         );
 
 
-        await answerCallback(
-          bot,
-          callback.id,
-          'Webhook is working ✅'
+        const answer =
+          await answerCallback(
+            bot,
+
+            callback.id,
+
+            'Webhook is working ✅'
+          );
+
+
+        console.log(
+          '📡 answerCallback result:'
         );
 
+        console.log(
+          JSON.stringify(
+            answer,
+            null,
+            2
+          )
+        );
+
+
+        // ------------------------------------------------------
+        // Edit the test message
+        // ------------------------------------------------------
 
         if (
           callback.message?.chat?.id &&
           callback.message?.message_id
         ) {
 
-          await telegram(
-            bot,
-            'editMessageText',
-            {
-              chat_id:
-                callback.message.chat.id,
+          const editResult =
+            await telegram(
+              bot,
 
-              message_id:
-                callback.message.message_id,
+              'editMessageText',
 
-              text:
-                '✅ <b>TEST CALLBACK RECEIVED</b>\n\nTelegram → Render → Express is working.',
+              {
+                chat_id:
+                  callback.message.chat.id,
 
-              parse_mode:
-                'HTML',
+                message_id:
+                  callback.message.message_id,
 
-              reply_markup: {
-                inline_keyboard: []
+                text:
+                  '✅ <b>TEST CALLBACK RECEIVED</b>\n\nTelegram → Render → Express is working.',
+
+                parse_mode:
+                  'HTML',
+
+                reply_markup: {
+                  inline_keyboard: []
+                }
               }
-            }
+            );
+
+
+          console.log(
+            '✏️ editMessageText result:'
+          );
+
+          console.log(
+            JSON.stringify(
+              editResult,
+              null,
+              2
+            )
           );
 
         }
 
 
         return;
+
       }
 
 
-      // ------------------------------------------------------
-      // OTHER CALLBACKS
-      // ------------------------------------------------------
+      // --------------------------------------------------------
+      // Any other callback
+      // --------------------------------------------------------
 
       console.log(
-        '⚠️ Callback is not the test callback.'
+        '⚠️ Unknown/test callback data:',
+        callback.data
       );
+
 
       await answerCallback(
         bot,
+
         callback.id,
+
         'Callback received'
       );
 
+
     } catch (error) {
 
+      console.error('');
       console.error(
-        '❌ Webhook processing error:',
+        '❌ WEBHOOK PROCESSING ERROR'
+      );
+
+      console.error(
+        error.stack ||
         error.message
       );
 
@@ -720,46 +975,41 @@ app.post(
 // START SERVER
 // ============================================================
 
-(async () => {
+app.listen(
+  PORT,
+  async () => {
 
-  console.log('');
-  console.log(
-    '🚀 Starting server...'
-  );
+    console.log('');
+    console.log(
+      '========================================'
+    );
 
-  console.log(
-    '🌐 DOMAIN:',
-    DOMAIN
-  );
+    console.log(
+      `🚀 SERVER LISTENING ON PORT ${PORT}`
+    );
 
-  console.log(
-    '🔌 PORT:',
-    PORT
-  );
+    console.log(
+      '🌐 DOMAIN:',
+      DOMAIN
+    );
+
+    console.log(
+      '========================================'
+    );
 
 
-  // Start HTTP server first
-  // so Render is listening before Telegram
-  // starts sending webhook requests.
+    if (!DOMAIN) {
 
-  app.listen(
-    PORT,
-    async () => {
-
-      console.log('');
-      console.log(
-        `🚀 Server listening on port ${PORT}`
+      console.error(
+        '❌ BACKEND_URL is missing.'
       );
 
-      console.log(
-        '🌐 Public domain:',
-        DOMAIN
-      );
-
-
-      await initializeWebhooks();
+      return;
 
     }
-  );
 
-})();
+
+    await initializeWebhooks();
+
+  }
+);
