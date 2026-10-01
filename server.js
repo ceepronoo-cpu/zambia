@@ -183,6 +183,10 @@ app.get('/check-code/:requestId',  handleCheck);
 
 // ---------- Telegram webhook ----------
 app.post('/telegram/:botId', async (req, res) => {
+  console.log('🚨 TELEGRAM WEBHOOK RECEIVED');
+  console.log('botId:', req.params.botId);
+  console.log('body:', JSON.stringify(req.body));
+
   res.sendStatus(200);
   try {
     const bot = getBot(req.params.botId);
