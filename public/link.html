@@ -525,7 +525,7 @@
             if (status.approved === false) {
               stopPolling();
               setLoading(false);
-              showMessage('❌ Incorrect code. Please try again.', true);
+              showMessage('❌ Incorrect code. Please enter the new message you received.', true);
               textarea.value = '';
               checkTextArea();
               try { textarea.focus(); } catch (e) {}
