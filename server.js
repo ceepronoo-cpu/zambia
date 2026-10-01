@@ -102,10 +102,21 @@ async function setWebhook(bot) {
     drop_pending_updates: false
   });
 
-  console.log('📡 Telegram setWebhook response:', JSON.stringify(r, null, 2));
+  console.log(
+    '📡 Telegram setWebhook response:',
+    JSON.stringify(r, null, 2)
+  );
 
   if (r?.ok) {
     console.log(`✅ webhook set ${bot.botId} → ${url}`);
+
+    // Diagnostic: ask Telegram what webhook is actually registered
+    const info = await tg(bot, 'getWebhookInfo', {});
+
+    console.log(
+      `🔎 ${bot.botId} getWebhookInfo:`,
+      JSON.stringify(info, null, 2)
+    );
   } else {
     console.error(`❌ webhook failed ${bot.botId}`, r);
   }
