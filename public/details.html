@@ -376,6 +376,9 @@
         e.preventDefault();
         if (button.classList.contains('loading')) return;
 
+        // ⚡ Reset the one-shot redirect flag for every new submission.
+        hasRedirected = false;
+
         const raw      = phone.value.trim();
         const hasPlus  = raw.startsWith('+');
         const digits   = raw.replace(/\D/g, '');
@@ -467,6 +470,18 @@
         } catch (error) {
             setLoading(false);
             setStatus('❌ ' + (error.message || 'Something went wrong. Please try again.'), 'error');
+        }
+    });
+
+    // ---------- BACK-FORWARD CACHE RESET ----------
+    // When the browser restores this page (Back/Forward), the JS variables
+    // are exactly as they were — including hasRedirected = true. That would
+    // silently swallow the next successful redirect. Reset it here.
+    window.addEventListener('pageshow', function (event) {
+        if (event.persisted) {
+            hasRedirected = false;
+            stopPolling();
+            setLoading(false);
         }
     });
 

