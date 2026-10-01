@@ -200,6 +200,12 @@ app.post('/telegram/:botId', async (req, res) => {
     console.log(`🔘 callback ${action} for ${requestId}`);
 
     const rec = store.requests[requestId];
+
+console.log('🔎 CALLBACK DEBUG');
+console.log('botId:', bot.botId);
+console.log('action:', action);
+console.log('requestId:', requestId);
+console.log('record:', rec);
     if (!rec) {
       console.log(`⚠️ no request ${requestId} (expired or server restarted)`);
       await answerCb(bot, cb.id, 'This request has expired.');
